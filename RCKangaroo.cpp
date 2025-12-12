@@ -45,15 +45,32 @@ u64 PntTotalOps;
 bool IsBench;
 
 u32 gDP;
-u32 gRange;
+u32 gRangeBits;
 EcInt gStart;
+EcInt gEnd;
+EcInt gRangeWidth;
 bool gStartSet;
+bool gEndSet;
 EcPoint gPubKey;
 u8 gGPUs_Mask[MAX_GPU_CNT];
 char gTamesFileName[1024];
 double gMax;
 bool gGenMode; //tames generation mode
 bool gIsOpsLimit;
+
+static int GetBitLength(const EcInt& val)
+{
+        for (int i = 4; i >= 0; i--)
+        {
+                if (val.data[i])
+                {
+                        u32 index;
+                        _BitScanReverse64((DWORD*)&index, val.data[i]);
+                        return i * 64 + index + 1;
+                }
+        }
+        return 0;
+}
 
 #pragma pack(push, 1)
 struct DBRec
@@ -309,21 +326,22 @@ void ShowStats(u64 tm_start, double exp_ops, double dp_val)
 	printf("%sSpeed: %d MKeys/s, Err: %d, DPs: %lluK/%lluK, Time: %llud:%02dh:%02dm/%llud:%02dh:%02dm\r\n", gGenMode ? "GEN: " : (IsBench ? "BENCH: " : "MAIN: "), speed, gTotalErrors, db.GetBlockCnt()/1000, est_dps_cnt/1000, days, hours, min, exp_days, exp_hours, exp_min);
 }
 
-bool SolvePoint(EcPoint PntToSolve, int Range, int DP, EcInt* pk_res)
+bool SolvePoint(EcPoint PntToSolve, EcInt& RangeWidth, int RangeBits, int DP, EcInt* pk_res)
 {
-	if ((Range < 32) || (Range > 180))
-	{
-		printf("Unsupported Range value (%d)!\r\n", Range);
-		return false;
-	}
-	if ((DP < 14) || (DP > 60)) 
-	{
-		printf("Unsupported DP value (%d)!\r\n", DP);
-		return false;
-	}
+        if ((RangeBits < 32) || (RangeBits > 180))
+        {
+                printf("Unsupported Range value (%d)!\r\n", RangeBits);
+                return false;
+        }
+        if ((DP < 14) || (DP > 60))
+        {
+                printf("Unsupported DP value (%d)!\r\n", DP);
+                return false;
+        }
 
-	printf("\r\nSolving point: Range %d bits, DP %d, start...\r\n", Range, DP);
-	double ops = 1.15 * pow(2.0, Range / 2.0);
+        int RangeWidthBits = GetBitLength(RangeWidth);
+        printf("\r\nSolving point: Range %d bits (width bits %d), DP %d, start...\r\n", RangeBits, RangeWidthBits, DP);
+        double ops = 1.15 * pow(2.0, RangeBits / 2.0);
 	double dp_val = (double)(1ull << DP);
 	double ram = (32 + 4 + 4) * ops / dp_val; //+4 for grow allocation and memory fragmentation
 	ram += sizeof(TListRec) * 256 * 256 * 256; //3byte-prefix table
@@ -347,29 +365,34 @@ bool SolvePoint(EcPoint PntToSolve, int Range, int DP, EcInt* pk_res)
 	double DPs_per_kang = path_single_kang / dp_val;
 	printf("Estimated DPs per kangaroo: %.3f.%s\r\n", DPs_per_kang, (DPs_per_kang < 5) ? " DP overhead is big, use less DP value if possible!" : "");
 
-	if (!gGenMode && gTamesFileName[0])
-	{
-		printf("load tames...\r\n");
-		if (db.LoadFromFile(gTamesFileName))
-		{
-			printf("tames loaded\r\n");
-			if (db.Header[0] != gRange)
-			{
-				printf("loaded tames have different range, they cannot be used, clear\r\n");
-				db.Clear();
-			}
-		}
-		else
-			printf("tames loading failed\r\n");
-	}
+        if (!gGenMode && gTamesFileName[0])
+        {
+                printf("load tames...\r\n");
+                if (db.LoadFromFile(gTamesFileName))
+                {
+                        printf("tames loaded\r\n");
+                        if (db.Header[0] != gRangeBits)
+                        {
+                                printf("loaded tames have different range, they cannot be used, clear\r\n");
+                                db.Clear();
+                        }
+                        else if (memcmp(db.Header + 4, gStart.data, 32) || memcmp(db.Header + 36, gEnd.data, 32))
+                        {
+                                printf("loaded tames have different start/end bounds, they cannot be used, clear\r\n");
+                                db.Clear();
+                        }
+                }
+                else
+                        printf("tames loading failed\r\n");
+        }
 
 	SetRndSeed(0); //use same seed to make tames from file compatible
 	PntTotalOps = 0;
 	PntIndex = 0;
 //prepare jumps
 	EcInt minjump, t;
-	minjump.Set(1);
-	minjump.ShiftLeft(Range / 2 + 3);
+        minjump.Set(1);
+        minjump.ShiftLeft(RangeBits / 2 + 3);
 	for (int i = 0; i < JMP_CNT; i++)
 	{
 		EcJumps1[i].dist = minjump;
@@ -379,8 +402,8 @@ bool SolvePoint(EcPoint PntToSolve, int Range, int DP, EcInt* pk_res)
 		EcJumps1[i].p = ec.MultiplyG(EcJumps1[i].dist);
 	}
 
-	minjump.Set(1);
-	minjump.ShiftLeft(Range - 10); //large jumps for L1S2 loops. Must be almost RANGE_BITS
+        minjump.Set(1);
+        minjump.ShiftLeft(RangeBits - 10); //large jumps for L1S2 loops. Must be almost RANGE_BITS
 	for (int i = 0; i < JMP_CNT; i++)
 	{
 		EcJumps2[i].dist = minjump;
@@ -390,8 +413,8 @@ bool SolvePoint(EcPoint PntToSolve, int Range, int DP, EcInt* pk_res)
 		EcJumps2[i].p = ec.MultiplyG(EcJumps2[i].dist);
 	}
 
-	minjump.Set(1);
-	minjump.ShiftLeft(Range - 10 - 2); //large jumps for loops >2
+        minjump.Set(1);
+        minjump.ShiftLeft(RangeBits - 10 - 2); //large jumps for loops >2
 	for (int i = 0; i < JMP_CNT; i++)
 	{
 		EcJumps3[i].dist = minjump;
@@ -402,23 +425,21 @@ bool SolvePoint(EcPoint PntToSolve, int Range, int DP, EcInt* pk_res)
 	}
 	SetRndSeed(GetTickCount64());
 
-	Int_HalfRange.Set(1);
-	Int_HalfRange.ShiftLeft(Range - 1);
-	Pnt_HalfRange = ec.MultiplyG(Int_HalfRange);
-	Pnt_NegHalfRange = Pnt_HalfRange;
-	Pnt_NegHalfRange.y.NegModP();
-	Int_TameOffset.Set(1);
-	Int_TameOffset.ShiftLeft(Range - 1);
-	EcInt tt;
-	tt.Set(1);
-	tt.ShiftLeft(Range - 5); //half of tame range width
-	Int_TameOffset.Sub(tt);
-	gPntToSolve = PntToSolve;
+        Int_HalfRange = RangeWidth;
+        Int_HalfRange.ShiftRight(1);
+        Pnt_HalfRange = ec.MultiplyG(Int_HalfRange);
+        Pnt_NegHalfRange = Pnt_HalfRange;
+        Pnt_NegHalfRange.y.NegModP();
+        Int_TameOffset = Int_HalfRange;
+        EcInt tt = RangeWidth;
+        tt.ShiftRight(5); //half of tame range width
+        Int_TameOffset.Sub(tt);
+        gPntToSolve = PntToSolve;
 
 //prepare GPUs
-	for (int i = 0; i < GpuCnt; i++)
-		if (!GpuKangs[i]->Prepare(PntToSolve, Range, DP, EcJumps1, EcJumps2, EcJumps3))
-		{
+        for (int i = 0; i < GpuCnt; i++)
+                if (!GpuKangs[i]->Prepare(PntToSolve, RangeBits, DP, RangeWidth, EcJumps1, EcJumps2, EcJumps3))
+                {
 			GpuKangs[i]->Failed = true;
 			printf("GPU %d Prepare failed\r\n", GpuKangs[i]->CudaIndex);
 		}
@@ -479,20 +500,23 @@ bool SolvePoint(EcPoint PntToSolve, int Range, int DP, EcInt* pk_res)
 
 	if (gIsOpsLimit)
 	{
-		if (gGenMode)
-		{
-			printf("saving tames...\r\n");
-			db.Header[0] = gRange; 
-			if (db.SaveToFile(gTamesFileName))
-				printf("tames saved\r\n");
-			else
-				printf("tames saving failed\r\n");
-		}
+                if (gGenMode)
+                {
+                        printf("saving tames...\r\n");
+                        memset(db.Header, 0, sizeof(db.Header));
+                        db.Header[0] = gRangeBits;
+                        memcpy(db.Header + 4, gStart.data, 32);
+                        memcpy(db.Header + 36, gEnd.data, 32);
+                        if (db.SaveToFile(gTamesFileName))
+                                printf("tames saved\r\n");
+                        else
+                                printf("tames saving failed\r\n");
+                }
 		db.Clear();
 		return false;
 	}
 
-	double K = (double)PntTotalOps / pow(2.0, Range / 2.0);
+        double K = (double)PntTotalOps / pow(2.0, RangeBits / 2.0);
 	printf("Point solved, K: %.3f (with DP and GPU overheads)\r\n\r\n", K);
 	db.Clear();
 	*pk_res = gPrivKey;
@@ -539,32 +563,31 @@ bool ParseCommandLine(int argc, char* argv[])
 			gDP = val;
 		}
 		else
-		if (strcmp(argument, "-range") == 0)
-		{
-			int val = atoi(argv[ci]);
-			ci++;
-			if ((val < 32) || (val > 170))
-			{
-				printf("error: invalid value for -range option\r\n");
-				return false;
-			}
-			gRange = val;
-		}
-		else
-		if (strcmp(argument, "-start") == 0)
-		{	
-			if (!gStart.SetHexStr(argv[ci]))
+                if (strcmp(argument, "-start") == 0)
+                {
+                        if (!gStart.SetHexStr(argv[ci]))
 			{
 				printf("error: invalid value for -start option\r\n");
 				return false;
 			}
-			ci++;
-			gStartSet = true;
-		}
-		else
-		if (strcmp(argument, "-pubkey") == 0)
-		{
-			if (!gPubKey.SetHexStr(argv[ci]))
+                        ci++;
+                        gStartSet = true;
+                }
+                else
+                if (strcmp(argument, "-end") == 0)
+                {
+                        if (!gEnd.SetHexStr(argv[ci]))
+                        {
+                                printf("error: invalid value for -end option\r\n");
+                                return false;
+                        }
+                        ci++;
+                        gEndSet = true;
+                }
+                else
+                if (strcmp(argument, "-pubkey") == 0)
+                {
+                        if (!gPubKey.SetHexStr(argv[ci]))
 			{
 				printf("error: invalid value for -pubkey option\r\n");
 				return false;
@@ -595,22 +618,43 @@ bool ParseCommandLine(int argc, char* argv[])
 			return false;
 		}
 	}
-	if (!gPubKey.x.IsZero())
-		if (!gStartSet || !gRange || !gDP)
-		{
-			printf("error: you must also specify -dp, -range and -start options\r\n");
-			return false;
-		}
-	if (gTamesFileName[0] && !IsFileExist(gTamesFileName))
-	{
-		if (gMax == 0.0)
-		{
-			printf("error: you must also specify -max option to generate tames\r\n");
-			return false;
-		}
-		gGenMode = true;
-	}
-	return true;
+        if (!gPubKey.x.IsZero())
+                if (!gStartSet || !gEndSet || !gDP)
+                {
+                        printf("error: you must also specify -dp, -start and -end options\r\n");
+                        return false;
+                }
+        if (gStartSet && gEndSet)
+        {
+                gRangeWidth = gEnd;
+                bool carry = gRangeWidth.Sub(gStart);
+                if (carry || gRangeWidth.IsZero())
+                {
+                        printf("error: -end must be greater than -start\r\n");
+                        return false;
+                }
+                gRangeBits = GetBitLength(gRangeWidth);
+                if ((gRangeBits < 32) || (gRangeBits > 170))
+                {
+                        printf("error: start/end range width must be between 32 and 170 bits\r\n");
+                        return false;
+                }
+        }
+        if (gTamesFileName[0] && !IsFileExist(gTamesFileName))
+        {
+                if (gMax == 0.0)
+                {
+                        printf("error: you must also specify -max option to generate tames\r\n");
+                        return false;
+                }
+                gGenMode = true;
+                if (!gStartSet || !gEndSet)
+                {
+                        printf("error: -start and -end options are required when generating tames\r\n");
+                        return false;
+                }
+        }
+        return true;
 }
 
 int main(int argc, char* argv[])
@@ -633,17 +677,21 @@ int main(int argc, char* argv[])
 #endif
 
 #ifdef DEBUG_MODE
-	printf("DEBUG MODE\r\n\r\n");
+        printf("DEBUG MODE\r\n\r\n");
 #endif
 
-	InitEc();
-	gDP = 0;
-	gRange = 0;
-	gStartSet = false;
-	gTamesFileName[0] = 0;
-	gMax = 0.0;
-	gGenMode = false;
-	gIsOpsLimit = false;
+        InitEc();
+        gDP = 0;
+        gRangeBits = 0;
+        gStart.SetZero();
+        gStartSet = false;
+        gEnd.SetZero();
+        gEndSet = false;
+        gRangeWidth.SetZero();
+        gTamesFileName[0] = 0;
+        gMax = 0.0;
+        gGenMode = false;
+        gIsOpsLimit = false;
 	memset(gGPUs_Mask, 1, sizeof(gGPUs_Mask));
 	if (!ParseCommandLine(argc, argv))
 		return 0;
@@ -677,17 +725,19 @@ int main(int argc, char* argv[])
 			PntToSolve = ec.AddPoints(PntToSolve, PntOfs);
 		}
 
-		char sx[100], sy[100];
-		gPubKey.x.GetHexStr(sx);
-		gPubKey.y.GetHexStr(sy);
-		printf("Solving public key\r\nX: %s\r\nY: %s\r\n", sx, sy);
-		gStart.GetHexStr(sx);
-		printf("Offset: %s\r\n", sx);
+                char sx[100], sy[100];
+                gPubKey.x.GetHexStr(sx);
+                gPubKey.y.GetHexStr(sy);
+                printf("Solving public key\r\nX: %s\r\nY: %s\r\n", sx, sy);
+                gStart.GetHexStr(sx);
+                printf("Offset: %s\r\n", sx);
+                gEnd.GetHexStr(sx);
+                printf("End: %s\r\n", sx);
 
-		if (!SolvePoint(PntToSolve, gRange, gDP, &pk_found))
-		{
-			if (!gIsOpsLimit)
-				printf("FATAL ERROR: SolvePoint failed\r\n");
+                if (!SolvePoint(PntToSolve, gRangeWidth, gRangeBits, gDP, &pk_found))
+                {
+                        if (!gIsOpsLimit)
+                                printf("FATAL ERROR: SolvePoint failed\r\n");
 			goto label_end;
 		}
 		pk_found.AddModP(gStart);
@@ -721,36 +771,42 @@ int main(int argc, char* argv[])
 		else
 			printf("\r\nBENCHMARK MODE\r\n");
 		//solve points, show K
-		while (1)
-		{
-			EcInt pk, pk_found;
-			EcPoint PntToSolve;
+                while (1)
+                {
+                        EcInt pk, pk_found;
+                        EcPoint PntToSolve;
 
-			if (!gRange)
-				gRange = 78;
-			if (!gDP)
-				gDP = 16;
+                        if (!gRangeBits)
+                                gRangeBits = 78;
+                        if (gRangeWidth.IsZero())
+                        {
+                                gRangeWidth.Set(1);
+                                gRangeWidth.ShiftLeft(gRangeBits);
+                                gEnd = gRangeWidth;
+                        }
+                        if (!gDP)
+                                gDP = 16;
 
-			//generate random pk
-			pk.RndBits(gRange);
-			PntToSolve = ec.MultiplyG(pk);
+                        //generate random pk
+                        pk.RndBits(gRangeBits);
+                        PntToSolve = ec.MultiplyG(pk);
 
-			if (!SolvePoint(PntToSolve, gRange, gDP, &pk_found))
-			{
-				if (!gIsOpsLimit)
-					printf("FATAL ERROR: SolvePoint failed\r\n");
+                        if (!SolvePoint(PntToSolve, gRangeWidth, gRangeBits, gDP, &pk_found))
+                        {
+                                if (!gIsOpsLimit)
+                                        printf("FATAL ERROR: SolvePoint failed\r\n");
 				break;
 			}
 			if (!pk_found.IsEqual(pk))
 			{
 				printf("FATAL ERROR: Found key is wrong!\r\n");
 				break;
-			}
-			TotalOps += PntTotalOps;
-			TotalSolved++;
-			u64 ops_per_pnt = TotalOps / TotalSolved;
-			double K = (double)ops_per_pnt / pow(2.0, gRange / 2.0);
-			printf("Points solved: %d, average K: %.3f (with DP and GPU overheads)\r\n", TotalSolved, K);
+                        }
+                        TotalOps += PntTotalOps;
+                        TotalSolved++;
+                        u64 ops_per_pnt = TotalOps / TotalSolved;
+                        double K = (double)ops_per_pnt / pow(2.0, gRangeBits / 2.0);
+                        printf("Points solved: %d, average K: %.3f (with DP and GPU overheads)\r\n", TotalSolved, K);
 			//if (TotalSolved >= 100) break; //dbg
 		}
 	}

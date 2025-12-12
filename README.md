@@ -26,7 +26,7 @@ Discussion thread: https://bitcointalk.org/index.php?topic=5517607
 
 <b>-start</b>		start offset of the key, in hex. Mandatory if "-pubkey" option is specified. For example, for puzzle #85 start offset is "1000000000000000000000". 
 
-<b>-range</b>		bit range of private the key. Mandatory if "-pubkey" option is specified. For example, for puzzle #85 bit range is "84" (84 bits). Must be in range 32...170. 
+<b>-end</b>             end of the search interval, in hex. Mandatory if "-pubkey" option is specified. The distance between start and end must be in range 32...170 bits.
 
 <b>-dp</b>		DP bits. Must be in range 14...60. Low DP bits values cause larger DB but reduces DP overhead and vice versa. 
 
@@ -38,11 +38,11 @@ When public key is solved, software displays it and also writes it to "RESULTS.T
 
 Sample command line for puzzle #85:
 
-RCKangaroo.exe -dp 16 -range 84 -start 1000000000000000000000 -pubkey 0329c4574a4fd8c810b7e42a4b398882b381bcd85e40c6883712912d167c83e73a
+RCKangaroo.exe -dp 16 -start 1000000000000000000000 -end 10000000000000000000000000000000000000 -pubkey 0329c4574a4fd8c810b7e42a4b398882b381bcd85e40c6883712912d167c83e73a
 
 Sample command to generate tames:
 
-RCKangaroo.exe -dp 16 -range 76 -tames tames76.dat -max 10
+RCKangaroo.exe -dp 16 -start 0 -end FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF -tames tames76.dat -max 10
 
 Then you can restart software with same parameters to see less K in benchmark mode or add "-tames tames76.dat" to solve some public key in 76-bit range faster.
 
@@ -55,7 +55,7 @@ Overall, this translates to roughly a 25% net improvement, which should not be i
 
 make CUDA_PATH=/usr/local/cuda-12.8 NVCC=/usr/local/cuda-12.8/bin/nvcc
 ./rckangaroo                # benchmark mode
-./rckangaroo -dp 16 -range 84 -start 1000000000000000000000 -pubkey 0329c4...83e73a
+./rckangaroo -dp 16 -start 1000000000000000000000 -end 10000000000000000000000000000000000000 -pubkey 0329c4...83e73a
 
 echo 'export PATH=/usr/local/cuda/bin:$PATH' >> ~/.bashrc
 echo 'export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH' >> ~/.bashrc
