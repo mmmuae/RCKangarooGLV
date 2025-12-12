@@ -8,6 +8,9 @@
 #include <vector>
 #include <cmath>
 #include <cstring>
+#include <set>
+#include <string>
+#include <algorithm>
 
 #include "cuda_runtime.h"
 #include "cuda.h"
@@ -69,6 +72,26 @@ double gMax;
 bool gGenMode; //tames generation mode
 bool gIsOpsLimit;
 
+// Gap tracking helpers
+struct EcIntLess
+{
+        bool operator()(const EcInt& a, const EcInt& b) const
+        {
+                for (int i = 4; i >= 0; --i)
+                {
+                        if (a.data[i] != b.data[i])
+                                return a.data[i] < b.data[i];
+                }
+                return false;
+        }
+};
+
+std::set<EcInt, EcIntLess> gTameDistances;
+std::set<EcInt, EcIntLess> gWildDistances;
+EcInt gBestTameDistance;
+EcInt gBestWildDistance;
+bool gHasGapPair;
+
 static int GetBitLength(const EcInt& val)
 {
         for (int i = 4; i >= 0; i--)
@@ -81,6 +104,139 @@ static int GetBitLength(const EcInt& val)
                 }
         }
         return 0;
+}
+
+// Deserialize 22-byte DP distance into EcInt with sign extension if needed
+static EcInt DeserializeDistance(const u8* dist)
+{
+        EcInt res;
+        memcpy(res.data, dist, 22);
+        // Sign-extend if negative marker is present
+        if (dist[21] == 0xFF)
+                memset(((u8*)res.data) + 22, 0xFF, 18);
+        else
+                memset(((u8*)res.data) + 22, 0, 18);
+        return res;
+}
+
+// Absolute unsigned difference between two EcInt values
+static EcInt AbsDistance(const EcInt& a, const EcInt& b)
+{
+        EcInt left = a;
+        EcInt right = b;
+        EcInt gap;
+        if (left.IsLessThanU(right))
+        {
+                gap = right;
+                gap.Sub(left);
+        }
+        else
+        {
+                gap = left;
+                gap.Sub(right);
+        }
+        return gap;
+}
+
+// Convert EcInt to billions using all limbs
+static double EcIntToBillions(const EcInt& val)
+{
+        long double acc = 0.0L;
+        for (int i = 4; i >= 0; --i)
+        {
+                        acc = acc * 18446744073709551616.0L + (long double)val.data[i];
+        }
+        acc /= 1000000000.0L;
+        return (double)acc;
+}
+
+// Convert EcInt to full decimal string (unsigned interpretation)
+static std::string EcIntToDecimal(const EcInt& val)
+{
+        u64 buffer[5];
+        memcpy(buffer, val.data, sizeof(buffer));
+
+        auto isZero = [&]() {
+                for (int i = 0; i < 5; ++i)
+                        if (buffer[i])
+                                return false;
+                return true;
+        };
+
+        if (isZero())
+                return std::string("0");
+
+        std::string result;
+        while (!isZero())
+        {
+                u64 quotient[5] = {0, 0, 0, 0, 0};
+                u64 rem = 0;
+                for (int i = 4; i >= 0; --i)
+                {
+                        __uint128_t cur = ((__uint128_t)rem << 64) | buffer[i];
+                        quotient[i] = (u64)(cur / 10);
+                        rem = (u64)(cur % 10);
+                }
+                result.push_back((char)('0' + rem));
+                memcpy(buffer, quotient, sizeof(buffer));
+        }
+
+        std::reverse(result.begin(), result.end());
+        return result;
+}
+
+static void UpdateGlobalGap(const EcInt& tameDist, const EcInt& wildDist)
+{
+        EcInt gap = AbsDistance(tameDist, wildDist);
+        if (!gHasLowestGap || gap.IsLessThanU(gLowestGap))
+        {
+                gLowestGap = gap;
+                gHasLowestGap = true;
+
+                gBestTameDistance = tameDist;
+                gBestWildDistance = wildDist;
+                gHasGapPair = true;
+
+                EcInt k_est = tameDist;
+                EcInt wildCopy = wildDist;
+                k_est.Sub(wildCopy);
+                k_est.Add(Int_HalfRange);
+
+                // Convert estimated offset key into an absolute key (like a real collision)
+                if (!gStart.IsZero())
+                {
+                        EcInt ofs = gStart;
+                        k_est.AddModP(ofs);
+                }
+
+                gEstimatedKey = k_est;
+                gHasEstimatedKey = true;
+        }
+}
+
+static void ConsiderGapCandidates(const EcInt& newDist, bool isTame)
+{
+        const std::set<EcInt, EcIntLess>& otherHerd = isTame ? gWildDistances : gTameDistances;
+        if (otherHerd.empty())
+                return;
+
+        auto it = otherHerd.lower_bound(newDist);
+        if (it != otherHerd.end())
+        {
+                if (isTame)
+                        UpdateGlobalGap(newDist, *it);
+                else
+                        UpdateGlobalGap(*it, newDist);
+        }
+
+        if (it != otherHerd.begin())
+        {
+                --it;
+                if (isTame)
+                        UpdateGlobalGap(newDist, *it);
+                else
+                        UpdateGlobalGap(*it, newDist);
+        }
 }
 
 #pragma pack(push, 1)
@@ -231,18 +387,20 @@ void CheckNewPoints()
 	PntIndex = 0;
 	csAddPoints.Leave();
 
-	for (int i = 0; i < cnt; i++)
-	{
-		DBRec nrec;
-		u8* p = pPntList2 + i * GPU_DP_SIZE;
-		memcpy(nrec.x, p, 12);
-		memcpy(nrec.d, p + 16, 22);
-		nrec.type = gGenMode ? TAME : p[40];
+        for (int i = 0; i < cnt; i++)
+        {
+                DBRec nrec;
+                u8* p = pPntList2 + i * GPU_DP_SIZE;
+                memcpy(nrec.x, p, 12);
+                memcpy(nrec.d, p + 16, 22);
+                nrec.type = gGenMode ? TAME : p[40];
 
-		// Count DPs by type
-		if (!gGenMode)
-		{
-			if (nrec.type == TAME)
+                EcInt fullDist = DeserializeDistance(nrec.d);
+
+                // Count DPs by type
+                if (!gGenMode)
+                {
+                        if (nrec.type == TAME)
 			{
 #ifdef _WIN32
 				InterlockedIncrement64((volatile LONGLONG*)&gTameCount);
@@ -263,14 +421,28 @@ void CheckNewPoints()
 #ifdef _WIN32
 				InterlockedIncrement64((volatile LONGLONG*)&gWild2Count);
 #else
-				__sync_fetch_and_add(&gWild2Count, 1);
+                                __sync_fetch_and_add(&gWild2Count, 1);
 #endif
-			}
-		}
+                        }
+                }
 
-		DBRec* pref = (DBRec*)db.FindOrAddDataBlock((u8*)&nrec);
-		if (gGenMode)
-			continue;
+                if (!gGenMode)
+                {
+                        if (nrec.type == TAME)
+                        {
+                                gTameDistances.insert(fullDist);
+                                ConsiderGapCandidates(fullDist, true);
+                        }
+                        else
+                        {
+                                gWildDistances.insert(fullDist);
+                                ConsiderGapCandidates(fullDist, false);
+                        }
+                }
+
+                DBRec* pref = (DBRec*)db.FindOrAddDataBlock((u8*)&nrec);
+                if (gGenMode)
+                        continue;
 		if (pref)
 		{
 			//in db we dont store first 3 bytes so restore them
@@ -327,9 +499,14 @@ void CheckNewPoints()
 				continue;
 			}
 
-			// Solution found! Use actual found key
-			gEstimatedKey = gPrivKey;
-			gHasEstimatedKey = true;
+                        // Solution found! Use actual found key
+                        gEstimatedKey = gPrivKey;
+                        if (!gStart.IsZero())
+                        {
+                                EcInt ofs = gStart;
+                                gEstimatedKey.AddModP(ofs);
+                        }
+                        gHasEstimatedKey = true;
 
 			gSolved = true;
 			break;
@@ -337,124 +514,11 @@ void CheckNewPoints()
 	}
 }
 
-// Scan database buckets for gaps between cross-herd DPs
-void ScanForGaps()
-{
-	static int scan_i = 0, scan_j = 0, scan_k = 0;
-	const int BUCKETS_PER_SCAN = 50000; // Scan 50K buckets per call (most are empty)
-	const int MAX_DPS_PER_BUCKET = 1000; // Max DPs to read from one bucket
-
-	u8* distances = (u8*)malloc(MAX_DPS_PER_BUCKET * 22);
-	u8* types = (u8*)malloc(MAX_DPS_PER_BUCKET);
-
-	int buckets_scanned = 0;
-	for (; scan_i < 256 && buckets_scanned < BUCKETS_PER_SCAN; )
-	{
-		for (; scan_j < 256 && buckets_scanned < BUCKETS_PER_SCAN; )
-		{
-			for (; scan_k < 256 && buckets_scanned < BUCKETS_PER_SCAN; scan_k++)
-			{
-				int count = db.GetBucketData(scan_i, scan_j, scan_k, distances, types, MAX_DPS_PER_BUCKET);
-				buckets_scanned++;
-
-				if (count < 2)
-					continue;
-
-				// Quick check: does bucket have both tame and wild?
-				bool has_tame = false, has_wild = false;
-				for (int m = 0; m < count; m++)
-				{
-					if (types[m] == TAME)
-						has_tame = true;
-					else
-						has_wild = true;
-					if (has_tame && has_wild)
-						break;
-				}
-				if (!has_tame || !has_wild)
-					continue;
-
-				// Compare all tame vs wild pairs in this bucket
-				for (int t = 0; t < count; t++)
-				{
-					if (types[t] != TAME)
-						continue;
-
-					EcInt tame_dist;
-					memcpy(tame_dist.data, distances + t * 22, 22);
-					if (distances[t * 22 + 21] == 0xFF)
-						memset(((u8*)tame_dist.data) + 22, 0xFF, 18);
-
-					for (int w = 0; w < count; w++)
-					{
-						if (types[w] == TAME)
-							continue;
-
-						EcInt wild_dist;
-						memcpy(wild_dist.data, distances + w * 22, 22);
-						if (distances[w * 22 + 21] == 0xFF)
-							memset(((u8*)wild_dist.data) + 22, 0xFF, 18);
-
-						// Calculate gap
-						EcInt gap;
-						if (tame_dist.IsLessThanU(wild_dist))
-						{
-							gap = wild_dist;
-							gap.Sub(tame_dist);
-						}
-						else
-						{
-							gap = tame_dist;
-							gap.Sub(wild_dist);
-						}
-
-						// Update lowest gap if smaller
-						if (!gHasLowestGap || gap.IsLessThanU(gLowestGap))
-						{
-							gLowestGap = gap;
-							gHasLowestGap = true;
-
-							// Calculate estimated key (Tame-Wild collision formula)
-							EcInt k_est = tame_dist;
-							k_est.Sub(wild_dist);
-							k_est.Add(Int_HalfRange);
-							gEstimatedKey = k_est;
-							gHasEstimatedKey = true;
-						}
-					}
-				}
-			}
-			if (buckets_scanned >= BUCKETS_PER_SCAN)
-				break;
-			scan_k = 0;
-			scan_j++;
-		}
-		if (buckets_scanned >= BUCKETS_PER_SCAN)
-			break;
-		scan_j = 0;
-		scan_i++;
-	}
-
-	// Reset to beginning when done
-	if (scan_i >= 256)
-	{
-		scan_i = 0;
-		scan_j = 0;
-		scan_k = 0;
-	}
-
-	free(distances);
-	free(types);
-}
-
 void ShowStats(u64 tm_start, double exp_ops, double dp_val, u64 total_ops)
 {
-	// Scan for gaps between cross-herd DPs
-	ScanForGaps();
-
 #ifdef DEBUG_MODE
-	for (int i = 0; i <= MD_LEN; i++)
-	{
+        for (int i = 0; i <= MD_LEN; i++)
+        {
 		u64 val = 0;
 		for (int j = 0; j < GpuCnt; j++)
 		{
@@ -486,48 +550,30 @@ void ShowStats(u64 tm_start, double exp_ops, double dp_val, u64 total_ops)
 	u64 wildTotal = gWild1Count + gWild2Count;
 	double twRatio = (wildTotal > 0) ? ((double)gTameCount / (double)wildTotal) : 0.0;
 
-	// Format lowest gap - display actual gap value divided by 1 billion
-	char gapStr[100];
-	if (gHasLowestGap)
-	{
-		// Convert EcInt to double for display (use first 64 bits as approximation)
-		double gapValue = (double)gLowestGap.data[0];
-		// Add contribution from higher bits if present
-		if (gLowestGap.data[1] != 0)
-			gapValue += (double)gLowestGap.data[1] * pow(2.0, 64.0);
+        // Format lowest gap using full precision converted to billions
+        char gapStr[100];
+        if (gHasLowestGap)
+        {
+                double gapDisplay = EcIntToBillions(gLowestGap);
+                snprintf(gapStr, sizeof(gapStr), "%.1f", gapDisplay);
+        }
+        else
+        {
+                sprintf(gapStr, "N/A");
+        }
 
-		// Divide by 1 billion for display
-		double gapDisplay = gapValue / 1e9;
-		sprintf(gapStr, "%.3f", gapDisplay);
-	}
-	else
-	{
-		sprintf(gapStr, "N/A");
-	}
-
-	// Format estimated key
-	char keyStr[100];
-	if (gHasEstimatedKey)
-	{
-		char fullKeyStr[200];
-		gEstimatedKey.GetHexStr(fullKeyStr);
-
-		// Show first 10 and last 4 hex chars with ellipsis
-		int len = strlen(fullKeyStr);
-		if (len > 20)
-		{
-			snprintf(keyStr, sizeof(keyStr), "%.10s...%.4s", fullKeyStr, fullKeyStr + len - 4);
-		}
-		else
-		{
-			strncpy(keyStr, fullKeyStr, sizeof(keyStr) - 1);
-			keyStr[sizeof(keyStr) - 1] = 0;
-		}
-	}
-	else
-	{
-		sprintf(keyStr, "N/A");
-	}
+        // Format estimated key (full decimal, no trimming)
+        char keyStr[200];
+        if (gHasEstimatedKey)
+        {
+                std::string decimal = EcIntToDecimal(gEstimatedKey);
+                strncpy(keyStr, decimal.c_str(), sizeof(keyStr) - 1);
+                keyStr[sizeof(keyStr) - 1] = 0;
+        }
+        else
+        {
+                sprintf(keyStr, "N/A");
+        }
 
 	// Use carriage return for sticky progress bar (updates in place)
 	printf("\r%sSpeed: %d MKeys/s, Err: %d, DPs: %lluK/%lluK, T/W: %.3f, l.gap: %s, k_est: %s, Time: %llud:%02dh:%02dm/%llud:%02dh:%02dm         ",
@@ -609,15 +655,20 @@ bool SolvePoint(EcPoint PntToSolve, EcInt& RangeWidth, int RangeBits, int DP, Ec
 	PntIndex = 0;
 
 	// Initialize statistics
-	gTameCount = 0;
-	gWild1Count = 0;
-	gWild2Count = 0;
-	gLowestGap.SetZero();
-	gHasLowestGap = false;
-	gEstimatedKey.SetZero();
-	gHasEstimatedKey = false;
+        gTameCount = 0;
+        gWild1Count = 0;
+        gWild2Count = 0;
+        gLowestGap.SetZero();
+        gHasLowestGap = false;
+        gEstimatedKey.SetZero();
+        gHasEstimatedKey = false;
+        gHasGapPair = false;
+        gTameDistances.clear();
+        gWildDistances.clear();
+        gBestTameDistance.SetZero();
+        gBestWildDistance.SetZero();
 //prepare jumps
-	EcInt minjump, t;
+        EcInt minjump, t;
         minjump.Set(1);
         minjump.ShiftLeft(RangeBits / 2 + 3);
 	for (int i = 0; i < JMP_CNT; i++)
