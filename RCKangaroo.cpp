@@ -359,56 +359,8 @@ void CheckNewPoints()
 	}
 }
 
-// Estimate gap and key based on current progress
-// Uses theoretical kangaroo algorithm properties
-void UpdateGapEstimates(double exp_ops, u64 total_ops)
-{
-	u64 dp_count = db.GetBlockCnt();
-	if (dp_count < 2)
-		return;
-
-	// For 2^n range with m DPs collected: expected gap ~ 2^(n/2) / sqrt(m)
-	// We calculate this in log space for accuracy with large ranges
-
-	// Gap in bits: log2(gap) = n/2 - log2(sqrt(m)) = n/2 - 0.5*log2(m)
-	double gap_bits = (double)gRangeBits / 2.0 - 0.5 * log2((double)dp_count);
-
-	// Store gap as a double for display (actual gap value, not in bits)
-	// For small gaps we can store in data[0], for large we'll display differently
-	if (gap_bits < 64)
-	{
-		u64 estimated_gap_val = (u64)pow(2.0, gap_bits);
-		if (estimated_gap_val == 0)
-			estimated_gap_val = 1;
-
-		// Only update if we don't have a better (actual collision) gap yet
-		if (!gHasLowestGap || (estimated_gap_val < gLowestGap.data[0]))
-		{
-			gLowestGap.SetZero();
-			gLowestGap.data[0] = estimated_gap_val;
-			gHasLowestGap = true;
-		}
-	}
-	else
-	{
-		// For very large gaps, store the bit representation
-		// We'll display this differently
-		gLowestGap.SetZero();
-		gLowestGap.data[0] = (u64)gap_bits; // Store as bit length
-		gHasLowestGap = true;
-	}
-
-	// Estimate key as center of range
-	// Start + HalfRange gives us the middle of the search space
-	gEstimatedKey.Assign(gStart);
-	gEstimatedKey.Add(Int_HalfRange);
-	gHasEstimatedKey = true;
-}
-
 void ShowStats(u64 tm_start, double exp_ops, double dp_val, u64 total_ops)
 {
-	// Update gap estimates based on current progress
-	UpdateGapEstimates(exp_ops, total_ops);
 
 #ifdef DEBUG_MODE
 	for (int i = 0; i <= MD_LEN; i++)
@@ -444,37 +396,33 @@ void ShowStats(u64 tm_start, double exp_ops, double dp_val, u64 total_ops)
 	u64 wildTotal = gWild1Count + gWild2Count;
 	double twRatio = (wildTotal > 0) ? ((double)gTameCount / (double)wildTotal) : 0.0;
 
-	// Format lowest gap
+	// Format lowest gap - display actual gap value divided by 1 billion
 	char gapStr[100];
 	if (gHasLowestGap)
 	{
-		u64 dp_count = db.GetBlockCnt();
-		if (dp_count < 2)
-		{
-			sprintf(gapStr, "N/A");
-		}
-		else
-		{
-			// Calculate gap in bits for display
-			double gap_bits = (double)gRangeBits / 2.0 - 0.5 * log2((double)dp_count);
+		// Convert EcInt to double for display (use first 64 bits as approximation)
+		double gapValue = (double)gLowestGap.data[0];
+		// Add contribution from higher bits if present
+		if (gLowestGap.data[1] != 0)
+			gapValue += (double)gLowestGap.data[1] * pow(2.0, 64.0);
 
-			// Display as "2^XX.X" for clarity
-			sprintf(gapStr, "2^%.1f", gap_bits);
-		}
+		// Divide by 1 billion for display
+		double gapDisplay = gapValue / 1e9;
+		sprintf(gapStr, "%.3f", gapDisplay);
 	}
 	else
 	{
 		sprintf(gapStr, "N/A");
 	}
 
-	// Format estimated key - show middle portion of the hex string
+	// Format estimated key
 	char keyStr[100];
 	if (gHasEstimatedKey)
 	{
 		char fullKeyStr[200];
 		gEstimatedKey.GetHexStr(fullKeyStr);
 
-		// Show first 12 and last 4 hex chars with ellipsis
+		// Show first 10 and last 4 hex chars with ellipsis
 		int len = strlen(fullKeyStr);
 		if (len > 20)
 		{
@@ -492,7 +440,7 @@ void ShowStats(u64 tm_start, double exp_ops, double dp_val, u64 total_ops)
 	}
 
 	// Use carriage return for sticky progress bar (updates in place)
-	printf("\r%sSpeed: %d MKeys/s, Err: %d, DPs: %lluK/%lluK, T/W: %.3f, l.gap: %s, k_est: %s, Time: %llud:%02dh:%02dm/%llud:%02dh:%02dm",
+	printf("\r%sSpeed: %d MKeys/s, Err: %d, DPs: %lluK/%lluK, T/W: %.3f, l.gap: %s, k_est: %s, Time: %llud:%02dh:%02dm/%llud:%02dh:%02dm         ",
 		gGenMode ? "GEN: " : (IsBench ? "BENCH: " : "MAIN: "),
 		speed,
 		gTotalErrors,
@@ -575,8 +523,8 @@ bool SolvePoint(EcPoint PntToSolve, EcInt& RangeWidth, int RangeBits, int DP, Ec
 	gWild1Count = 0;
 	gWild2Count = 0;
 	gLowestGap.SetZero();
-	gEstimatedKey.SetZero();
 	gHasLowestGap = false;
+	gEstimatedKey.SetZero();
 	gHasEstimatedKey = false;
 //prepare jumps
 	EcInt minjump, t;
@@ -624,6 +572,11 @@ bool SolvePoint(EcPoint PntToSolve, EcInt& RangeWidth, int RangeBits, int DP, Ec
         tt.ShiftRight(5); //half of tame range width
         Int_TameOffset.Sub(tt);
         gPntToSolve = PntToSolve;
+
+	// Initialize estimated key to center of range (Start + HalfRange)
+	gEstimatedKey.Assign(gStart);
+	gEstimatedKey.Add(Int_HalfRange);
+	gHasEstimatedKey = true;
 
 //prepare GPUs
         for (int i = 0; i < GpuCnt; i++)
