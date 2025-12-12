@@ -306,6 +306,24 @@ bool TFastBase::SaveToFile(char* fn)
 	return true;
 }
 
+// Get data from a specific bucket for gap scanning
+int TFastBase::GetBucketData(int i, int j, int k, u8* distances, u8* types, int maxCount)
+{
+	TListRec* list = &lists[i][j][k];
+	int count = list->cnt;
+	if (count > maxCount)
+		count = maxCount;
+
+	for (int m = 0; m < count; m++)
+	{
+		void* ptr = mps[i].GetRecPtr(list->data[m]);
+		// Copy distance (22 bytes) and type (1 byte at offset 22)
+		memcpy(distances + m * 22, ptr, 22);
+		memcpy(types + m, (u8*)ptr + 22, 1);
+	}
+	return count;
+}
+
 bool IsFileExist(char* fn)
 {
 	FILE* fp = fopen(fn, "rb");

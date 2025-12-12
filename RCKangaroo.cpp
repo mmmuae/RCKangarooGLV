@@ -312,50 +312,7 @@ void CheckNewPoints()
 				WildType = nrec.type;
 			}
 
-			// Calculate gap between tame and wild DPs
-			EcInt gap;
-			if (t.IsLessThanU(w))
-			{
-				gap = w;
-				gap.Sub(t);
-			}
-			else
-			{
-				gap = t;
-				gap.Sub(w);
-			}
-
-			// Update lowest gap and calculate estimated key if this gap is smaller
-			if (!gHasLowestGap || gap.IsLessThanU(gLowestGap))
-			{
-				gLowestGap = gap;
-				gHasLowestGap = true;
-
-				// Calculate estimated key from this gap (as if it were a collision)
-				// Use same formula as Collision_SOTA
-				EcInt k_est;
-				if (TameType == TAME)
-				{
-					// Tame-Wild collision: key = (t - w) + HalfRange
-					k_est = t;
-					k_est.Sub(w);
-					k_est.Add(Int_HalfRange);
-				}
-				else
-				{
-					// Wild-Wild collision: key = (t - w) / 2 + HalfRange
-					k_est = t;
-					k_est.Sub(w);
-					if (k_est.data[4] >> 63)
-						k_est.Neg();
-					k_est.ShiftRight(1);
-					k_est.Add(Int_HalfRange);
-				}
-				gEstimatedKey = k_est;
-				gHasEstimatedKey = true;
-			}
-
-			// Now verify if this is the actual solution
+			// Verify if this is a collision (matching X coordinate)
 			bool res = Collision_SOTA(gPntToSolve, t, TameType, w, WildType, false) || Collision_SOTA(gPntToSolve, t, TameType, w, WildType, true);
 			if (!res)
 			{
@@ -380,8 +337,106 @@ void CheckNewPoints()
 	}
 }
 
+// Scan database buckets for gaps between cross-herd DPs
+void ScanForGaps()
+{
+	static int scan_i = 0, scan_j = 0, scan_k = 0;
+	const int BUCKETS_PER_SCAN = 100; // Scan 100 buckets per call
+	const int MAX_DPS_PER_BUCKET = 1000; // Max DPs to read from one bucket
+
+	u8* distances = (u8*)malloc(MAX_DPS_PER_BUCKET * 22);
+	u8* types = (u8*)malloc(MAX_DPS_PER_BUCKET);
+
+	int buckets_scanned = 0;
+	for (; scan_i < 256 && buckets_scanned < BUCKETS_PER_SCAN; )
+	{
+		for (; scan_j < 256 && buckets_scanned < BUCKETS_PER_SCAN; )
+		{
+			for (; scan_k < 256 && buckets_scanned < BUCKETS_PER_SCAN; scan_k++)
+			{
+				int count = db.GetBucketData(scan_i, scan_j, scan_k, distances, types, MAX_DPS_PER_BUCKET);
+				buckets_scanned++;
+
+				if (count < 2)
+					continue;
+
+				// Compare all tame vs wild pairs in this bucket
+				for (int t = 0; t < count; t++)
+				{
+					if (types[t] != TAME)
+						continue;
+
+					EcInt tame_dist;
+					memcpy(tame_dist.data, distances + t * 22, 22);
+					if (distances[t * 22 + 21] == 0xFF)
+						memset(((u8*)tame_dist.data) + 22, 0xFF, 18);
+
+					for (int w = 0; w < count; w++)
+					{
+						if (types[w] == TAME)
+							continue;
+
+						EcInt wild_dist;
+						memcpy(wild_dist.data, distances + w * 22, 22);
+						if (distances[w * 22 + 21] == 0xFF)
+							memset(((u8*)wild_dist.data) + 22, 0xFF, 18);
+
+						// Calculate gap
+						EcInt gap;
+						if (tame_dist.IsLessThanU(wild_dist))
+						{
+							gap = wild_dist;
+							gap.Sub(tame_dist);
+						}
+						else
+						{
+							gap = tame_dist;
+							gap.Sub(wild_dist);
+						}
+
+						// Update lowest gap if smaller
+						if (!gHasLowestGap || gap.IsLessThanU(gLowestGap))
+						{
+							gLowestGap = gap;
+							gHasLowestGap = true;
+
+							// Calculate estimated key (Tame-Wild collision formula)
+							EcInt k_est = tame_dist;
+							k_est.Sub(wild_dist);
+							k_est.Add(Int_HalfRange);
+							gEstimatedKey = k_est;
+							gHasEstimatedKey = true;
+						}
+					}
+				}
+			}
+			if (buckets_scanned >= BUCKETS_PER_SCAN)
+				break;
+			scan_k = 0;
+			scan_j++;
+		}
+		if (buckets_scanned >= BUCKETS_PER_SCAN)
+			break;
+		scan_j = 0;
+		scan_i++;
+	}
+
+	// Reset to beginning when done
+	if (scan_i >= 256)
+	{
+		scan_i = 0;
+		scan_j = 0;
+		scan_k = 0;
+	}
+
+	free(distances);
+	free(types);
+}
+
 void ShowStats(u64 tm_start, double exp_ops, double dp_val, u64 total_ops)
 {
+	// Scan for gaps between cross-herd DPs
+	ScanForGaps();
 
 #ifdef DEBUG_MODE
 	for (int i = 0; i <= MD_LEN; i++)

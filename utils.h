@@ -101,6 +101,9 @@ public:
 	u64 GetBlockCnt();
 	bool LoadFromFile(char* fn);
 	bool SaveToFile(char* fn);
+
+	// For gap scanning - returns count of items in bucket and fills arrays
+	int GetBucketData(int i, int j, int k, u8* distances, u8* types, int maxCount);
 };
 
 bool IsFileExist(char* fn);
