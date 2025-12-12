@@ -6,6 +6,8 @@
 
 #include <iostream>
 #include <vector>
+#include <cmath>
+#include <cstring>
 
 #include "cuda_runtime.h"
 #include "cuda.h"
@@ -310,6 +312,29 @@ void CheckNewPoints()
 				WildType = nrec.type;
 			}
 
+			// Calculate gap distance for statistics (even before verifying collision)
+			// This gives us progress information
+			EcInt gap;
+			if (t.IsLessThanU(w))
+			{
+				gap = w;
+				gap.Sub(t);
+			}
+			else
+			{
+				gap = t;
+				gap.Sub(w);
+			}
+
+			// Update lowest gap if this is smaller
+			// Use actual gap from collision, which is more accurate than theoretical estimate
+			if (!gHasLowestGap || gap.IsLessThanU(gLowestGap))
+			{
+				gLowestGap = gap;
+				gHasLowestGap = true;
+			}
+
+			// Verify the collision is valid
 			bool res = Collision_SOTA(gPntToSolve, t, TameType, w, WildType, false) || Collision_SOTA(gPntToSolve, t, TameType, w, WildType, true);
 			if (!res)
 			{
@@ -324,27 +349,9 @@ void CheckNewPoints()
 				continue;
 			}
 
-			// Calculate gap distance for statistics
-			EcInt gap;
-			if (t.IsLessThanU(w))
-			{
-				gap = w;
-				gap.Sub(t);
-			}
-			else
-			{
-				gap = t;
-				gap.Sub(w);
-			}
-
-			// Update lowest gap if this is smaller
-			if (!gHasLowestGap || gap.IsLessThanU(gLowestGap))
-			{
-				gLowestGap = gap;
-				gEstimatedKey = gPrivKey;
-				gHasLowestGap = true;
-				gHasEstimatedKey = true;
-			}
+			// Solution found! Update estimated key with actual found key
+			gEstimatedKey = gPrivKey;
+			gHasEstimatedKey = true;
 
 			gSolved = true;
 			break;
@@ -352,8 +359,64 @@ void CheckNewPoints()
 	}
 }
 
-void ShowStats(u64 tm_start, double exp_ops, double dp_val)
+// Estimate gap and key based on current progress
+// Uses theoretical kangaroo algorithm properties
+void UpdateGapEstimates(double exp_ops, u64 total_ops)
 {
+	u64 dp_count = db.GetBlockCnt();
+	if (dp_count < 2)
+		return;
+
+	// Theoretical expected gap decreases as we collect more DPs
+	// Gap ~ sqrt(range) / sqrt(DPs_collected)
+	// For a range of 2^n, expected gap when close to solution is proportional to:
+	// sqrt(2^n) / sqrt(number_of_DPs)
+
+	// Calculate expected gap based on progress
+	// As we get closer to expected_ops, the gap should decrease
+	double progress_ratio = (double)total_ops / exp_ops;
+	if (progress_ratio < 0.01)
+		progress_ratio = 0.01; // Avoid division by very small numbers
+
+	// Expected gap decreases with sqrt of progress
+	// At 100% progress, gap should be near 1
+	// At 1% progress, gap is ~10x larger
+	double expected_gap_factor = sqrt(1.0 / progress_ratio);
+
+	// Estimate gap using birthday paradox principle
+	// Expected gap ~ sqrt(range_size / dp_count)
+	// For 2^n range with m DPs collected: gap ~ 2^(n/2) / sqrt(m)
+	double range_sqrt = sqrt((double)gRangeWidth.data[0]);
+	double dp_sqrt = sqrt((double)dp_count);
+	if (dp_sqrt < 1.0)
+		dp_sqrt = 1.0;
+
+	u64 estimated_gap_val = (u64)(range_sqrt / dp_sqrt);
+	if (estimated_gap_val == 0)
+		estimated_gap_val = 1;
+
+	// Only update if we don't have a better (actual collision) gap yet
+	// or if this is smaller than what we have
+	if (!gHasLowestGap || (estimated_gap_val < gLowestGap.data[0]))
+	{
+		gLowestGap.SetZero();
+		gLowestGap.data[0] = estimated_gap_val;
+		gHasLowestGap = true;
+	}
+
+	// Estimate key as center of range (symmetric search)
+	// In reality, the key could be anywhere in the range, but center is best estimate
+	// without additional information
+	gEstimatedKey = gStart;
+	gEstimatedKey.Add(Int_HalfRange);
+	gHasEstimatedKey = true;
+}
+
+void ShowStats(u64 tm_start, double exp_ops, double dp_val, u64 total_ops)
+{
+	// Update gap estimates based on current progress
+	UpdateGapEstimates(exp_ops, total_ops);
+
 #ifdef DEBUG_MODE
 	for (int i = 0; i <= MD_LEN; i++)
 	{
@@ -589,7 +652,7 @@ bool SolvePoint(EcPoint PntToSolve, EcInt& RangeWidth, int RangeBits, int DP, Ec
 		Sleep(10);
 		if (GetTickCount64() - tm_stats > 10 * 1000)
 		{
-			ShowStats(tm0, ops, dp_val);
+			ShowStats(tm0, ops, dp_val, PntTotalOps);
 			tm_stats = GetTickCount64();
 		}
 
