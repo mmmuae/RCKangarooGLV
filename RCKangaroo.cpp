@@ -312,8 +312,7 @@ void CheckNewPoints()
 				WildType = nrec.type;
 			}
 
-			// Calculate gap distance for statistics (even before verifying collision)
-			// This gives us progress information
+			// Calculate gap between tame and wild DPs
 			EcInt gap;
 			if (t.IsLessThanU(w))
 			{
@@ -326,15 +325,37 @@ void CheckNewPoints()
 				gap.Sub(w);
 			}
 
-			// Update lowest gap if this is smaller
-			// Use actual gap from collision, which is more accurate than theoretical estimate
+			// Update lowest gap and calculate estimated key if this gap is smaller
 			if (!gHasLowestGap || gap.IsLessThanU(gLowestGap))
 			{
 				gLowestGap = gap;
 				gHasLowestGap = true;
+
+				// Calculate estimated key from this gap (as if it were a collision)
+				// Use same formula as Collision_SOTA
+				EcInt k_est;
+				if (TameType == TAME)
+				{
+					// Tame-Wild collision: key = (t - w) + HalfRange
+					k_est = t;
+					k_est.Sub(w);
+					k_est.Add(Int_HalfRange);
+				}
+				else
+				{
+					// Wild-Wild collision: key = (t - w) / 2 + HalfRange
+					k_est = t;
+					k_est.Sub(w);
+					if (k_est.data[4] >> 63)
+						k_est.Neg();
+					k_est.ShiftRight(1);
+					k_est.Add(Int_HalfRange);
+				}
+				gEstimatedKey = k_est;
+				gHasEstimatedKey = true;
 			}
 
-			// Verify the collision is valid
+			// Now verify if this is the actual solution
 			bool res = Collision_SOTA(gPntToSolve, t, TameType, w, WildType, false) || Collision_SOTA(gPntToSolve, t, TameType, w, WildType, true);
 			if (!res)
 			{
@@ -349,7 +370,7 @@ void CheckNewPoints()
 				continue;
 			}
 
-			// Solution found! Update estimated key with actual found key
+			// Solution found! Use actual found key
 			gEstimatedKey = gPrivKey;
 			gHasEstimatedKey = true;
 
@@ -572,11 +593,6 @@ bool SolvePoint(EcPoint PntToSolve, EcInt& RangeWidth, int RangeBits, int DP, Ec
         tt.ShiftRight(5); //half of tame range width
         Int_TameOffset.Sub(tt);
         gPntToSolve = PntToSolve;
-
-	// Initialize estimated key to center of range (Start + HalfRange)
-	gEstimatedKey.Assign(gStart);
-	gEstimatedKey.Add(Int_HalfRange);
-	gHasEstimatedKey = true;
 
 //prepare GPUs
         for (int i = 0; i < GpuCnt; i++)
