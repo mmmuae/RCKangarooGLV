@@ -192,6 +192,195 @@ static std::string EcIntToDecimal(const EcInt& val)
         return result;
 }
 
+static bool IsLessThan(const EcInt& a, const EcInt& b)
+{
+        for (int i = 4; i >= 0; --i)
+        {
+                if (a.data[i] != b.data[i])
+                        return a.data[i] < b.data[i];
+        }
+        return false;
+}
+
+static EcInt EstimateKeyFromPair(const DistanceEntry& a, const DistanceEntry& b)
+{
+        bool aIsTame = a.type == TAME;
+        bool bIsTame = b.type == TAME;
+
+        EcInt k_est;
+        if (aIsTame || bIsTame)
+        {
+                EcInt tameDist = aIsTame ? a.dist : b.dist;
+                EcInt wildDist = aIsTame ? b.dist : a.dist;
+
+                EcInt diff = tameDist;
+                diff.Sub(wildDist);
+
+                EcInt primary = diff;
+                primary.Add(Int_HalfRange);
+
+                EcInt secondary = diff;
+                secondary.Neg();
+                secondary.Add(Int_HalfRange);
+
+                if (!gStart.IsZero())
+                {
+                        EcInt ofs = gStart;
+                        primary.AddModP(ofs);
+                        secondary.AddModP(ofs);
+                }
+
+                EcInt distPrimary = AbsDistance(primary, gStart);
+                EcInt distSecondary = AbsDistance(secondary, gStart);
+                k_est = IsLessThan(distPrimary, distSecondary) ? primary : secondary;
+        }
+        else
+        {
+                EcInt d1 = a.dist;
+                EcInt d2 = b.dist;
+                EcInt diff = d1;
+                diff.Sub(d2);
+
+                EcInt absDiff = diff;
+                if (absDiff.data[4] >> 63)
+                        absDiff.Neg();
+
+                EcInt primary = absDiff;
+                primary.ShiftRight(1);
+                primary.Add(Int_HalfRange);
+
+                EcInt secondary = absDiff;
+                secondary.Neg();
+                secondary.ShiftRight(1);
+                secondary.Add(Int_HalfRange);
+
+                if (!gStart.IsZero())
+                {
+                        EcInt ofs = gStart;
+                        primary.AddModP(ofs);
+                        secondary.AddModP(ofs);
+                }
+
+                EcInt distPrimary = AbsDistance(primary, gStart);
+                EcInt distSecondary = AbsDistance(secondary, gStart);
+                k_est = IsLessThan(distPrimary, distSecondary) ? primary : secondary;
+        }
+
+        return k_est;
+}
+
+static void UpdateGlobalGap(const DistanceEntry& distA, const DistanceEntry& distB)
+{
+        EcInt gap = AbsDistance(distA.dist, distB.dist);
+        if (!gHasLowestGap || gap.IsLessThanU(gLowestGap))
+        {
+                gLowestGap = gap;
+                gHasLowestGap = true;
+
+                gBestDistanceA = distA;
+                gBestDistanceB = distB;
+                gHasGapPair = true;
+
+                gEstimatedKey = EstimateKeyFromPair(distA, distB);
+                gHasEstimatedKey = true;
+        }
+}
+
+static void ConsiderGapWithSet(const DistanceEntry& entry, const std::multiset<DistanceEntry, DistanceEntryLess>& otherHerd)
+{
+        if (otherHerd.empty())
+                return;
+
+        auto it = otherHerd.lower_bound(entry);
+        if (it != otherHerd.end())
+                UpdateGlobalGap(entry, *it);
+
+        if (it != otherHerd.begin())
+        {
+                --it;
+                UpdateGlobalGap(entry, *it);
+        }
+}
+
+// Deserialize 22-byte DP distance into EcInt with sign extension if needed
+static EcInt DeserializeDistance(const u8* dist)
+{
+        EcInt res;
+        memcpy(res.data, dist, 22);
+        // Sign-extend if negative marker is present
+        if (dist[21] == 0xFF)
+                memset(((u8*)res.data) + 22, 0xFF, 18);
+        else
+                memset(((u8*)res.data) + 22, 0, 18);
+        return res;
+}
+
+// Absolute unsigned difference between two EcInt values
+static EcInt AbsDistance(const EcInt& a, const EcInt& b)
+{
+        EcInt left = a;
+        EcInt right = b;
+        EcInt gap;
+        if (left.IsLessThanU(right))
+        {
+                gap = right;
+                gap.Sub(left);
+        }
+        else
+        {
+                gap = left;
+                gap.Sub(right);
+        }
+        return gap;
+}
+
+// Convert EcInt to billions using all limbs
+static double EcIntToBillions(const EcInt& val)
+{
+        long double acc = 0.0L;
+        for (int i = 4; i >= 0; --i)
+        {
+                        acc = acc * 18446744073709551616.0L + (long double)val.data[i];
+        }
+        acc /= 1000000000.0L;
+        return (double)acc;
+}
+
+// Convert EcInt to full decimal string (unsigned interpretation)
+static std::string EcIntToDecimal(const EcInt& val)
+{
+        u64 buffer[5];
+        memcpy(buffer, val.data, sizeof(buffer));
+
+        auto isZero = [&]() {
+                for (int i = 0; i < 5; ++i)
+                        if (buffer[i])
+                                return false;
+                return true;
+        };
+
+        if (isZero())
+                return std::string("0");
+
+        std::string result;
+        while (!isZero())
+        {
+                u64 quotient[5] = {0, 0, 0, 0, 0};
+                u64 rem = 0;
+                for (int i = 4; i >= 0; --i)
+                {
+                        __uint128_t cur = ((__uint128_t)rem << 64) | buffer[i];
+                        quotient[i] = (u64)(cur / 10);
+                        rem = (u64)(cur % 10);
+                }
+                result.push_back((char)('0' + rem));
+                memcpy(buffer, quotient, sizeof(buffer));
+        }
+
+        std::reverse(result.begin(), result.end());
+        return result;
+}
+
 static EcInt EstimateKeyFromPair(const DistanceEntry& a, const DistanceEntry& b)
 {
         bool aIsTame = a.type == TAME;
