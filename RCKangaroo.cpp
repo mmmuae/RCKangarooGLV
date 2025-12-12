@@ -367,47 +367,40 @@ void UpdateGapEstimates(double exp_ops, u64 total_ops)
 	if (dp_count < 2)
 		return;
 
-	// Theoretical expected gap decreases as we collect more DPs
-	// Gap ~ sqrt(range) / sqrt(DPs_collected)
-	// For a range of 2^n, expected gap when close to solution is proportional to:
-	// sqrt(2^n) / sqrt(number_of_DPs)
+	// For 2^n range with m DPs collected: expected gap ~ 2^(n/2) / sqrt(m)
+	// We calculate this in log space for accuracy with large ranges
 
-	// Calculate expected gap based on progress
-	// As we get closer to expected_ops, the gap should decrease
-	double progress_ratio = (double)total_ops / exp_ops;
-	if (progress_ratio < 0.01)
-		progress_ratio = 0.01; // Avoid division by very small numbers
+	// Gap in bits: log2(gap) = n/2 - log2(sqrt(m)) = n/2 - 0.5*log2(m)
+	double gap_bits = (double)gRangeBits / 2.0 - 0.5 * log2((double)dp_count);
 
-	// Expected gap decreases with sqrt of progress
-	// At 100% progress, gap should be near 1
-	// At 1% progress, gap is ~10x larger
-	double expected_gap_factor = sqrt(1.0 / progress_ratio);
-
-	// Estimate gap using birthday paradox principle
-	// Expected gap ~ sqrt(range_size / dp_count)
-	// For 2^n range with m DPs collected: gap ~ 2^(n/2) / sqrt(m)
-	double range_sqrt = sqrt((double)gRangeWidth.data[0]);
-	double dp_sqrt = sqrt((double)dp_count);
-	if (dp_sqrt < 1.0)
-		dp_sqrt = 1.0;
-
-	u64 estimated_gap_val = (u64)(range_sqrt / dp_sqrt);
-	if (estimated_gap_val == 0)
-		estimated_gap_val = 1;
-
-	// Only update if we don't have a better (actual collision) gap yet
-	// or if this is smaller than what we have
-	if (!gHasLowestGap || (estimated_gap_val < gLowestGap.data[0]))
+	// Store gap as a double for display (actual gap value, not in bits)
+	// For small gaps we can store in data[0], for large we'll display differently
+	if (gap_bits < 64)
 	{
+		u64 estimated_gap_val = (u64)pow(2.0, gap_bits);
+		if (estimated_gap_val == 0)
+			estimated_gap_val = 1;
+
+		// Only update if we don't have a better (actual collision) gap yet
+		if (!gHasLowestGap || (estimated_gap_val < gLowestGap.data[0]))
+		{
+			gLowestGap.SetZero();
+			gLowestGap.data[0] = estimated_gap_val;
+			gHasLowestGap = true;
+		}
+	}
+	else
+	{
+		// For very large gaps, store the bit representation
+		// We'll display this differently
 		gLowestGap.SetZero();
-		gLowestGap.data[0] = estimated_gap_val;
+		gLowestGap.data[0] = (u64)gap_bits; // Store as bit length
 		gHasLowestGap = true;
 	}
 
-	// Estimate key as center of range (symmetric search)
-	// In reality, the key could be anywhere in the range, but center is best estimate
-	// without additional information
-	gEstimatedKey = gStart;
+	// Estimate key as center of range
+	// Start + HalfRange gives us the middle of the search space
+	gEstimatedKey.Assign(gStart);
 	gEstimatedKey.Add(Int_HalfRange);
 	gHasEstimatedKey = true;
 }
@@ -455,26 +448,42 @@ void ShowStats(u64 tm_start, double exp_ops, double dp_val, u64 total_ops)
 	char gapStr[100];
 	if (gHasLowestGap)
 	{
-		// Get the lowest 64 bits for display
-		sprintf(gapStr, "%llu", gLowestGap.data[0]);
+		u64 dp_count = db.GetBlockCnt();
+		if (dp_count < 2)
+		{
+			sprintf(gapStr, "N/A");
+		}
+		else
+		{
+			// Calculate gap in bits for display
+			double gap_bits = (double)gRangeBits / 2.0 - 0.5 * log2((double)dp_count);
+
+			// Display as "2^XX.X" for clarity
+			sprintf(gapStr, "2^%.1f", gap_bits);
+		}
 	}
 	else
 	{
 		sprintf(gapStr, "N/A");
 	}
 
-	// Format estimated key
+	// Format estimated key - show middle portion of the hex string
 	char keyStr[100];
 	if (gHasEstimatedKey)
 	{
-		gEstimatedKey.GetHexStr(keyStr);
-		// Truncate to first 16 chars for display
-		if (strlen(keyStr) > 16)
+		char fullKeyStr[200];
+		gEstimatedKey.GetHexStr(fullKeyStr);
+
+		// Show first 12 and last 4 hex chars with ellipsis
+		int len = strlen(fullKeyStr);
+		if (len > 20)
 		{
-			keyStr[13] = '.';
-			keyStr[14] = '.';
-			keyStr[15] = '.';
-			keyStr[16] = 0;
+			snprintf(keyStr, sizeof(keyStr), "%.10s...%.4s", fullKeyStr, fullKeyStr + len - 4);
+		}
+		else
+		{
+			strncpy(keyStr, fullKeyStr, sizeof(keyStr) - 1);
+			keyStr[sizeof(keyStr) - 1] = 0;
 		}
 	}
 	else
