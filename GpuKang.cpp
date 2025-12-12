@@ -25,13 +25,14 @@ int RCGpuKang::CalcKangCnt()
 }
 
 //executes in main thread
-bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJumps1, EcJMP* _EcJumps2, EcJMP* _EcJumps3)
+bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _RangeBits, int _DP, EcInt _RangeWidth, EcJMP* _EcJumps1, EcJMP* _EcJumps2, EcJMP* _EcJumps3)
 {
-	PntToSolve = _PntToSolve;
-	Range = _Range;
-	DP = _DP;
-	EcJumps1 = _EcJumps1;
-	EcJumps2 = _EcJumps2;
+        PntToSolve = _PntToSolve;
+        RangeBits = _RangeBits;
+        RangeWidth = _RangeWidth;
+        DP = _DP;
+        EcJumps1 = _EcJumps1;
+        EcJumps2 = _EcJumps2;
 	EcJumps3 = _EcJumps3;
 	StopFlag = false;
 	Failed = false;
@@ -282,21 +283,21 @@ void RCGpuKang::Stop()
 
 void RCGpuKang::GenerateRndDistances()
 {
-	for (int i = 0; i < KangCnt; i++)
-	{
-		EcInt d;
-		if (i < KangCnt / 3)
-		{
-			d.RndBits(Range - 4); //TAME kangs
-			d.Add(TameOffset); //center tame herd around half-range
-		}
-		else
-		{
-			d.RndBits(Range - 1);
-			d.data[0] &= 0xFFFFFFFFFFFFFFFE; //must be even
-		}
-		memcpy(RndPnts[i].priv, d.data, 24);
-	}
+        for (int i = 0; i < KangCnt; i++)
+        {
+                EcInt d;
+                if (i < KangCnt / 3)
+                {
+                        d.RndBits(RangeBits - 4); //TAME kangs
+                        d.Add(TameOffset); //center tame herd around half-range
+                }
+                else
+                {
+                        d.RndBits(RangeBits - 1);
+                        d.data[0] &= 0xFFFFFFFFFFFFFFFE; //must be even
+                }
+                memcpy(RndPnts[i].priv, d.data, 24);
+        }
 }
 
 bool RCGpuKang::Start()
@@ -309,13 +310,13 @@ bool RCGpuKang::Start()
 	if (err != cudaSuccess)
 		return false;
 
-	HalfRange.Set(1);
-	HalfRange.ShiftLeft(Range - 1);
-	TameOffset.Set(1);
-	TameOffset.ShiftLeft(Range - 5); // half of tame width
-	TameOffset.Neg();
-	TameOffset.Add(HalfRange);
-	PntHalfRange = ec.MultiplyG(HalfRange);
+        HalfRange = RangeWidth;
+        HalfRange.ShiftRight(1);
+        TameOffset = RangeWidth;
+        TameOffset.ShiftRight(5); // half of tame width
+        TameOffset.Neg();
+        TameOffset.Add(HalfRange);
+        PntHalfRange = ec.MultiplyG(HalfRange);
 	NegPntHalfRange = PntHalfRange;
 	NegPntHalfRange.y.NegModP();
 

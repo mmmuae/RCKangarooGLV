@@ -27,16 +27,17 @@ struct TPointPriv
 class RCGpuKang
 {
 private:
-	bool StopFlag;
-	EcPoint PntToSolve;
-	int Range; //in bits
-	int DP; //in bits
-	Ec ec;
+        bool StopFlag;
+        EcPoint PntToSolve;
+        int RangeBits; //in bits
+        int DP; //in bits
+        Ec ec;
 
 	u32* DPs_out;
-	TKparams Kparams;
+        TKparams Kparams;
 
         EcInt HalfRange;
+        EcInt RangeWidth;
         EcInt TameOffset;
         EcPoint PntHalfRange;
         EcPoint NegPntHalfRange;
@@ -58,17 +59,17 @@ private:
 	int Dbg_CheckKangs();
 #endif
 public:
-	int persistingL2CacheMaxSize;
-	int CudaIndex; //gpu index in cuda
+        int persistingL2CacheMaxSize;
+        int CudaIndex; //gpu index in cuda
 	int mpCnt;
 	int KangCnt;
-	bool Failed;
-	bool IsOldGpu;
+        bool Failed;
+        bool IsOldGpu;
 
-	int CalcKangCnt();
-	bool Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJumps1, EcJMP* _EcJumps2, EcJMP* _EcJumps3);
-	void Stop();
-	void Execute();
+        int CalcKangCnt();
+        bool Prepare(EcPoint _PntToSolve, int _RangeBits, int _DP, EcInt _RangeWidth, EcJMP* _EcJumps1, EcJMP* _EcJumps2, EcJMP* _EcJumps3);
+        void Stop();
+        void Execute();
 
 	u32 dbg[256];
 
