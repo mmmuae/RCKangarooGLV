@@ -286,7 +286,10 @@ void RCGpuKang::GenerateRndDistances()
 	{
 		EcInt d;
 		if (i < KangCnt / 3)
+		{
 			d.RndBits(Range - 4); //TAME kangs
+			d.Add(TameOffset); //center tame herd around half-range
+		}
 		else
 		{
 			d.RndBits(Range - 1);
@@ -308,6 +311,10 @@ bool RCGpuKang::Start()
 
 	HalfRange.Set(1);
 	HalfRange.ShiftLeft(Range - 1);
+	TameOffset.Set(1);
+	TameOffset.ShiftLeft(Range - 5); // half of tame width
+	TameOffset.Neg();
+	TameOffset.Add(HalfRange);
 	PntHalfRange = ec.MultiplyG(HalfRange);
 	NegPntHalfRange = PntHalfRange;
 	NegPntHalfRange.y.NegModP();
