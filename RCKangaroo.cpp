@@ -145,6 +145,34 @@ static EcInt AbsDistance(const EcInt& a, const EcInt& b)
         return gap;
 }
 
+// Normalize a candidate key so it always falls inside the configured search range
+static EcInt NormalizeKeyToRange(const EcInt& cand)
+{
+        // If range width is unknown we cannot normalize
+        if (gRangeWidth.IsZero())
+                return cand;
+
+        EcInt normalized = cand;
+
+        // Work in coordinates relative to gStart to avoid overflow
+        if (!gStart.IsZero())
+        {
+                bool borrowed = normalized.Sub(gStart);
+                if (borrowed)
+                        normalized.Add(gRangeWidth);
+        }
+
+        // Bring value into [0, gRangeWidth)
+        while (!normalized.IsLessThanU(gRangeWidth))
+                normalized.Sub(gRangeWidth);
+
+        // Convert back to absolute coordinate
+        if (!gStart.IsZero())
+                normalized.Add(gStart);
+
+        return normalized;
+}
+
 // Convert EcInt to billions using all limbs
 static double EcIntToBillions(const EcInt& val)
 {
@@ -266,7 +294,7 @@ static EcInt EstimateKeyFromPair(const DistanceEntry& a, const DistanceEntry& b)
                 k_est = IsLessThan(distPrimary, distSecondary) ? primary : secondary;
         }
 
-        return k_est;
+        return NormalizeKeyToRange(k_est);
 }
 
 static void UpdateGlobalGap(const DistanceEntry& distA, const DistanceEntry& distB)
