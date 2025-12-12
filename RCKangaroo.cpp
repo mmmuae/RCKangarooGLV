@@ -44,6 +44,15 @@ u32 gTotalErrors;
 u64 PntTotalOps;
 bool IsBench;
 
+// Statistics tracking
+volatile u64 gTameCount;
+volatile u64 gWild1Count;
+volatile u64 gWild2Count;
+EcInt gLowestGap;
+EcInt gEstimatedKey;
+bool gHasLowestGap;
+bool gHasEstimatedKey;
+
 u32 gDP;
 u32 gRangeBits;
 EcInt gStart;
@@ -157,7 +166,7 @@ void AddPointsToList(u32* data, int pnt_cnt, u64 ops_cnt)
 	if (PntIndex + pnt_cnt >= MAX_CNT_LIST)
 	{
 		csAddPoints.Leave();
-		printf("DPs buffer overflow, some points lost, increase DP value!\r\n");
+		printf("\n\rDPs buffer overflow, some points lost, increase DP value!\r\n");
 		return;
 	}
 	memcpy(pPntList + GPU_DP_SIZE * PntIndex, data, pnt_cnt * GPU_DP_SIZE);
@@ -228,6 +237,35 @@ void CheckNewPoints()
 		memcpy(nrec.d, p + 16, 22);
 		nrec.type = gGenMode ? TAME : p[40];
 
+		// Count DPs by type
+		if (!gGenMode)
+		{
+			if (nrec.type == TAME)
+			{
+#ifdef _WIN32
+				InterlockedIncrement64((volatile LONGLONG*)&gTameCount);
+#else
+				__sync_fetch_and_add(&gTameCount, 1);
+#endif
+			}
+			else if (nrec.type == WILD1)
+			{
+#ifdef _WIN32
+				InterlockedIncrement64((volatile LONGLONG*)&gWild1Count);
+#else
+				__sync_fetch_and_add(&gWild1Count, 1);
+#endif
+			}
+			else if (nrec.type == WILD2)
+			{
+#ifdef _WIN32
+				InterlockedIncrement64((volatile LONGLONG*)&gWild2Count);
+#else
+				__sync_fetch_and_add(&gWild2Count, 1);
+#endif
+			}
+		}
+
 		DBRec* pref = (DBRec*)db.FindOrAddDataBlock((u8*)&nrec);
 		if (gGenMode)
 			continue;
@@ -280,11 +318,34 @@ void CheckNewPoints()
 					;// ToLog("W1 and W2 collides in mirror");
 				else
 				{
-					printf("Collision Error\r\n");
+					printf("\n\rCollision Error\r\n");
 					gTotalErrors++;
 				}
 				continue;
 			}
+
+			// Calculate gap distance for statistics
+			EcInt gap;
+			if (t.IsLessThanU(w))
+			{
+				gap = w;
+				gap.Sub(t);
+			}
+			else
+			{
+				gap = t;
+				gap.Sub(w);
+			}
+
+			// Update lowest gap if this is smaller
+			if (!gHasLowestGap || gap.IsLessThanU(gLowestGap))
+			{
+				gLowestGap = gap;
+				gEstimatedKey = gPrivKey;
+				gHasLowestGap = true;
+				gHasEstimatedKey = true;
+			}
+
 			gSolved = true;
 			break;
 		}
@@ -322,8 +383,55 @@ void ShowStats(u64 tm_start, double exp_ops, double dp_val)
 	u64 days = sec / (3600 * 24);
 	int hours = (int)(sec - days * (3600 * 24)) / 3600;
 	int min = (int)(sec - days * (3600 * 24) - hours * 3600) / 60;
-	 
-	printf("%sSpeed: %d MKeys/s, Err: %d, DPs: %lluK/%lluK, Time: %llud:%02dh:%02dm/%llud:%02dh:%02dm\r\n", gGenMode ? "GEN: " : (IsBench ? "BENCH: " : "MAIN: "), speed, gTotalErrors, db.GetBlockCnt()/1000, est_dps_cnt/1000, days, hours, min, exp_days, exp_hours, exp_min);
+
+	// Calculate T/W ratio
+	u64 wildTotal = gWild1Count + gWild2Count;
+	double twRatio = (wildTotal > 0) ? ((double)gTameCount / (double)wildTotal) : 0.0;
+
+	// Format lowest gap
+	char gapStr[100];
+	if (gHasLowestGap)
+	{
+		// Get the lowest 64 bits for display
+		sprintf(gapStr, "%llu", gLowestGap.data[0]);
+	}
+	else
+	{
+		sprintf(gapStr, "N/A");
+	}
+
+	// Format estimated key
+	char keyStr[100];
+	if (gHasEstimatedKey)
+	{
+		gEstimatedKey.GetHexStr(keyStr);
+		// Truncate to first 16 chars for display
+		if (strlen(keyStr) > 16)
+		{
+			keyStr[13] = '.';
+			keyStr[14] = '.';
+			keyStr[15] = '.';
+			keyStr[16] = 0;
+		}
+	}
+	else
+	{
+		sprintf(keyStr, "N/A");
+	}
+
+	// Use carriage return for sticky progress bar (updates in place)
+	printf("\r%sSpeed: %d MKeys/s, Err: %d, DPs: %lluK/%lluK, T/W: %.3f, l.gap: %s, k_est: %s, Time: %llud:%02dh:%02dm/%llud:%02dh:%02dm",
+		gGenMode ? "GEN: " : (IsBench ? "BENCH: " : "MAIN: "),
+		speed,
+		gTotalErrors,
+		db.GetBlockCnt()/1000,
+		est_dps_cnt/1000,
+		twRatio,
+		gapStr,
+		keyStr,
+		days, hours, min,
+		exp_days, exp_hours, exp_min);
+	fflush(stdout);
 }
 
 bool SolvePoint(EcPoint PntToSolve, EcInt& RangeWidth, int RangeBits, int DP, EcInt* pk_res)
@@ -389,6 +497,15 @@ bool SolvePoint(EcPoint PntToSolve, EcInt& RangeWidth, int RangeBits, int DP, Ec
 	SetRndSeed(0); //use same seed to make tames from file compatible
 	PntTotalOps = 0;
 	PntIndex = 0;
+
+	// Initialize statistics
+	gTameCount = 0;
+	gWild1Count = 0;
+	gWild2Count = 0;
+	gLowestGap.SetZero();
+	gEstimatedKey.SetZero();
+	gHasLowestGap = false;
+	gHasEstimatedKey = false;
 //prepare jumps
 	EcInt minjump, t;
         minjump.Set(1);
@@ -479,12 +596,12 @@ bool SolvePoint(EcPoint PntToSolve, EcInt& RangeWidth, int RangeBits, int DP, Ec
 		if ((MaxTotalOps > 0.0) && (PntTotalOps > MaxTotalOps))
 		{
 			gIsOpsLimit = true;
-			printf("Operations limit reached\r\n");
+			printf("\n\rOperations limit reached\r\n");
 			break;
 		}
 	}
 
-	printf("Stopping work ...\r\n");
+	printf("\n\rStopping work ...\r\n");
 	for (int i = 0; i < GpuCnt; i++)
 		GpuKangs[i]->Stop();
 	while (ThrCnt)
@@ -517,7 +634,7 @@ bool SolvePoint(EcPoint PntToSolve, EcInt& RangeWidth, int RangeBits, int DP, Ec
 	}
 
         double K = (double)PntTotalOps / pow(2.0, RangeBits / 2.0);
-	printf("Point solved, K: %.3f (with DP and GPU overheads)\r\n\r\n", K);
+	printf("\n\rPoint solved, K: %.3f (with DP and GPU overheads)\r\n\r\n", K);
 	db.Clear();
 	*pk_res = gPrivKey;
 	return true;
