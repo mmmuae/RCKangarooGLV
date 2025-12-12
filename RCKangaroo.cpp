@@ -73,23 +73,30 @@ bool gGenMode; //tames generation mode
 bool gIsOpsLimit;
 
 // Gap tracking helpers
-struct EcIntLess
+struct DistanceEntry
 {
-        bool operator()(const EcInt& a, const EcInt& b) const
+        EcInt dist;
+        int type;
+};
+
+struct DistanceEntryLess
+{
+        bool operator()(const DistanceEntry& a, const DistanceEntry& b) const
         {
                 for (int i = 4; i >= 0; --i)
                 {
-                        if (a.data[i] != b.data[i])
-                                return a.data[i] < b.data[i];
+                        if (a.dist.data[i] != b.dist.data[i])
+                                return a.dist.data[i] < b.dist.data[i];
                 }
-                return false;
+                return a.type < b.type;
         }
 };
 
-std::set<EcInt, EcIntLess> gTameDistances;
-std::set<EcInt, EcIntLess> gWildDistances;
-EcInt gBestTameDistance;
-EcInt gBestWildDistance;
+std::multiset<DistanceEntry, DistanceEntryLess> gTameDistances;
+std::multiset<DistanceEntry, DistanceEntryLess> gWild1Distances;
+std::multiset<DistanceEntry, DistanceEntryLess> gWild2Distances;
+DistanceEntry gBestDistanceA;
+DistanceEntry gBestDistanceB;
 bool gHasGapPair;
 
 static int GetBitLength(const EcInt& val)
@@ -104,6 +111,175 @@ static int GetBitLength(const EcInt& val)
                 }
         }
         return 0;
+}
+
+// Deserialize 22-byte DP distance into EcInt with sign extension if needed
+static EcInt DeserializeDistance(const u8* dist)
+{
+        EcInt res;
+        memcpy(res.data, dist, 22);
+        // Sign-extend if negative marker is present
+        if (dist[21] == 0xFF)
+                memset(((u8*)res.data) + 22, 0xFF, 18);
+        else
+                memset(((u8*)res.data) + 22, 0, 18);
+        return res;
+}
+
+// Absolute unsigned difference between two EcInt values
+static EcInt AbsDistance(const EcInt& a, const EcInt& b)
+{
+        EcInt left = a;
+        EcInt right = b;
+        EcInt gap;
+        if (left.IsLessThanU(right))
+        {
+                gap = right;
+                gap.Sub(left);
+        }
+        else
+        {
+                gap = left;
+                gap.Sub(right);
+        }
+        return gap;
+}
+
+// Convert EcInt to billions using all limbs
+static double EcIntToBillions(const EcInt& val)
+{
+        long double acc = 0.0L;
+        for (int i = 4; i >= 0; --i)
+        {
+                        acc = acc * 18446744073709551616.0L + (long double)val.data[i];
+        }
+        acc /= 1000000000.0L;
+        return (double)acc;
+}
+
+// Convert EcInt to full decimal string (unsigned interpretation)
+static std::string EcIntToDecimal(const EcInt& val)
+{
+        u64 buffer[5];
+        memcpy(buffer, val.data, sizeof(buffer));
+
+        auto isZero = [&]() {
+                for (int i = 0; i < 5; ++i)
+                        if (buffer[i])
+                                return false;
+                return true;
+        };
+
+        if (isZero())
+                return std::string("0");
+
+        std::string result;
+        while (!isZero())
+        {
+                u64 quotient[5] = {0, 0, 0, 0, 0};
+                u64 rem = 0;
+                for (int i = 4; i >= 0; --i)
+                {
+                        __uint128_t cur = ((__uint128_t)rem << 64) | buffer[i];
+                        quotient[i] = (u64)(cur / 10);
+                        rem = (u64)(cur % 10);
+                }
+                result.push_back((char)('0' + rem));
+                memcpy(buffer, quotient, sizeof(buffer));
+        }
+
+        std::reverse(result.begin(), result.end());
+        return result;
+}
+
+static EcInt EstimateKeyFromPair(const DistanceEntry& a, const DistanceEntry& b)
+{
+        bool aIsTame = a.type == TAME;
+        bool bIsTame = b.type == TAME;
+
+        EcInt k_est;
+        if (aIsTame || bIsTame)
+        {
+            const EcInt& tameDist = aIsTame ? a.dist : b.dist;
+            const EcInt& wildDist = aIsTame ? b.dist : a.dist;
+
+            k_est = tameDist;
+            k_est.Sub(wildDist);
+            EcInt mirror = k_est;
+            mirror.Neg();
+
+            // Prefer the non-mirrored candidate but keep the mirrored option
+            EcInt primary = k_est;
+            primary.Add(Int_HalfRange);
+
+            EcInt secondary = mirror;
+            secondary.Add(Int_HalfRange);
+
+            // Choose the candidate that falls inside the search bounds after offset (if set)
+            if (!gStart.IsZero())
+            {
+                    EcInt ofs = gStart;
+                    primary.AddModP(ofs);
+                    secondary.AddModP(ofs);
+            }
+
+            // Select the candidate closer to the middle of the range as a stable heuristic
+            EcInt midpoint = Int_HalfRange;
+            EcInt diffPrimary = AbsDistance(primary, midpoint);
+            EcInt diffSecondary = AbsDistance(secondary, midpoint);
+            k_est = diffPrimary.IsLessThanU(diffSecondary) ? primary : secondary;
+        }
+        else
+        {
+                // Wild1 vs Wild2 pair
+                k_est = a.dist;
+                k_est.Sub(b.dist);
+                if (k_est.data[4] >> 63)
+                        k_est.Neg();
+                k_est.ShiftRight(1);
+                k_est.Add(Int_HalfRange);
+
+                if (!gStart.IsZero())
+                {
+                        EcInt ofs = gStart;
+                        k_est.AddModP(ofs);
+                }
+        }
+
+        return k_est;
+}
+
+static void UpdateGlobalGap(const DistanceEntry& distA, const DistanceEntry& distB)
+{
+        EcInt gap = AbsDistance(distA.dist, distB.dist);
+        if (!gHasLowestGap || gap.IsLessThanU(gLowestGap))
+        {
+                gLowestGap = gap;
+                gHasLowestGap = true;
+
+                gBestDistanceA = distA;
+                gBestDistanceB = distB;
+                gHasGapPair = true;
+
+                gEstimatedKey = EstimateKeyFromPair(distA, distB);
+                gHasEstimatedKey = true;
+        }
+}
+
+static void ConsiderGapWithSet(const DistanceEntry& entry, const std::multiset<DistanceEntry, DistanceEntryLess>& otherHerd)
+{
+        if (otherHerd.empty())
+                return;
+
+        auto it = otherHerd.lower_bound(entry);
+        if (it != otherHerd.end())
+                UpdateGlobalGap(entry, *it);
+
+        if (it != otherHerd.begin())
+        {
+                --it;
+                UpdateGlobalGap(entry, *it);
+        }
 }
 
 // Deserialize 22-byte DP distance into EcInt with sign extension if needed
@@ -428,15 +604,24 @@ void CheckNewPoints()
 
                 if (!gGenMode)
                 {
+                        DistanceEntry entry{fullDist, nrec.type};
                         if (nrec.type == TAME)
                         {
-                                gTameDistances.insert(fullDist);
-                                ConsiderGapCandidates(fullDist, true);
+                                gTameDistances.insert(entry);
+                                ConsiderGapWithSet(entry, gWild1Distances);
+                                ConsiderGapWithSet(entry, gWild2Distances);
+                        }
+                        else if (nrec.type == WILD1)
+                        {
+                                gWild1Distances.insert(entry);
+                                ConsiderGapWithSet(entry, gTameDistances);
+                                ConsiderGapWithSet(entry, gWild2Distances);
                         }
                         else
                         {
-                                gWildDistances.insert(fullDist);
-                                ConsiderGapCandidates(fullDist, false);
+                                gWild2Distances.insert(entry);
+                                ConsiderGapWithSet(entry, gTameDistances);
+                                ConsiderGapWithSet(entry, gWild1Distances);
                         }
                 }
 
@@ -664,9 +849,12 @@ bool SolvePoint(EcPoint PntToSolve, EcInt& RangeWidth, int RangeBits, int DP, Ec
         gHasEstimatedKey = false;
         gHasGapPair = false;
         gTameDistances.clear();
-        gWildDistances.clear();
-        gBestTameDistance.SetZero();
-        gBestWildDistance.SetZero();
+        gWild1Distances.clear();
+        gWild2Distances.clear();
+        gBestDistanceA.dist.SetZero();
+        gBestDistanceA.type = 0;
+        gBestDistanceB.dist.SetZero();
+        gBestDistanceB.type = 0;
 //prepare jumps
         EcInt minjump, t;
         minjump.Set(1);
