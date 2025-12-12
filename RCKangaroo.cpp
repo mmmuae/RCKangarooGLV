@@ -341,7 +341,7 @@ void CheckNewPoints()
 void ScanForGaps()
 {
 	static int scan_i = 0, scan_j = 0, scan_k = 0;
-	const int BUCKETS_PER_SCAN = 100; // Scan 100 buckets per call
+	const int BUCKETS_PER_SCAN = 50000; // Scan 50K buckets per call (most are empty)
 	const int MAX_DPS_PER_BUCKET = 1000; // Max DPs to read from one bucket
 
 	u8* distances = (u8*)malloc(MAX_DPS_PER_BUCKET * 22);
@@ -358,6 +358,20 @@ void ScanForGaps()
 				buckets_scanned++;
 
 				if (count < 2)
+					continue;
+
+				// Quick check: does bucket have both tame and wild?
+				bool has_tame = false, has_wild = false;
+				for (int m = 0; m < count; m++)
+				{
+					if (types[m] == TAME)
+						has_tame = true;
+					else
+						has_wild = true;
+					if (has_tame && has_wild)
+						break;
+				}
+				if (!has_tame || !has_wild)
 					continue;
 
 				// Compare all tame vs wild pairs in this bucket
