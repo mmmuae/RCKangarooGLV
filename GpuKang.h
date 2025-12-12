@@ -36,10 +36,11 @@ private:
 	u32* DPs_out;
 	TKparams Kparams;
 
-	EcInt HalfRange;
-	EcPoint PntHalfRange;
-	EcPoint NegPntHalfRange;
-	TPointPriv* RndPnts;
+        EcInt HalfRange;
+        EcInt TameOffset;
+        EcPoint PntHalfRange;
+        EcPoint NegPntHalfRange;
+        TPointPriv* RndPnts;
 	EcJMP* EcJumps1;
 	EcJMP* EcJumps2;
 	EcJMP* EcJumps3;
