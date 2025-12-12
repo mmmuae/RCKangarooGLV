@@ -201,6 +201,14 @@ static void UpdateGlobalGap(const EcInt& tameDist, const EcInt& wildDist)
                 EcInt wildCopy = wildDist;
                 k_est.Sub(wildCopy);
                 k_est.Add(Int_HalfRange);
+
+                // Convert estimated offset key into an absolute key (like a real collision)
+                if (!gStart.IsZero())
+                {
+                        EcInt ofs = gStart;
+                        k_est.AddModP(ofs);
+                }
+
                 gEstimatedKey = k_est;
                 gHasEstimatedKey = true;
         }
@@ -491,9 +499,14 @@ void CheckNewPoints()
 				continue;
 			}
 
-			// Solution found! Use actual found key
-			gEstimatedKey = gPrivKey;
-			gHasEstimatedKey = true;
+                        // Solution found! Use actual found key
+                        gEstimatedKey = gPrivKey;
+                        if (!gStart.IsZero())
+                        {
+                                EcInt ofs = gStart;
+                                gEstimatedKey.AddModP(ofs);
+                        }
+                        gHasEstimatedKey = true;
 
 			gSolved = true;
 			break;
