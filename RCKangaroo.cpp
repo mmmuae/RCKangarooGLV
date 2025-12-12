@@ -145,6 +145,34 @@ static EcInt AbsDistance(const EcInt& a, const EcInt& b)
         return gap;
 }
 
+// Normalize a candidate key so it always falls inside the configured search range
+static EcInt NormalizeKeyToRange(const EcInt& cand)
+{
+        // If range width is unknown we cannot normalize
+        if (gRangeWidth.IsZero())
+                return cand;
+
+        EcInt normalized = cand;
+
+        // Work in coordinates relative to gStart to avoid overflow
+        if (!gStart.IsZero())
+        {
+                bool borrowed = normalized.Sub(gStart);
+                if (borrowed)
+                        normalized.Add(gRangeWidth);
+        }
+
+        // Bring value into [0, gRangeWidth)
+        while (!normalized.IsLessThanU(gRangeWidth))
+                normalized.Sub(gRangeWidth);
+
+        // Convert back to absolute coordinate
+        if (!gStart.IsZero())
+                normalized.Add(gStart);
+
+        return normalized;
+}
+
 // Convert EcInt to billions using all limbs
 static double EcIntToBillions(const EcInt& val)
 {
@@ -266,7 +294,7 @@ static EcInt EstimateKeyFromPair(const DistanceEntry& a, const DistanceEntry& b)
                 k_est = IsLessThan(distPrimary, distSecondary) ? primary : secondary;
         }
 
-        return k_est;
+        return NormalizeKeyToRange(k_est);
 }
 
 static void UpdateGlobalGap(const DistanceEntry& distA, const DistanceEntry& distB)
@@ -299,308 +327,6 @@ static void ConsiderGapWithSet(const DistanceEntry& entry, const std::multiset<D
         {
                 --it;
                 UpdateGlobalGap(entry, *it);
-        }
-}
-
-// Deserialize 22-byte DP distance into EcInt with sign extension if needed
-static EcInt DeserializeDistance(const u8* dist)
-{
-        EcInt res;
-        memcpy(res.data, dist, 22);
-        // Sign-extend if negative marker is present
-        if (dist[21] == 0xFF)
-                memset(((u8*)res.data) + 22, 0xFF, 18);
-        else
-                memset(((u8*)res.data) + 22, 0, 18);
-        return res;
-}
-
-// Absolute unsigned difference between two EcInt values
-static EcInt AbsDistance(const EcInt& a, const EcInt& b)
-{
-        EcInt left = a;
-        EcInt right = b;
-        EcInt gap;
-        if (left.IsLessThanU(right))
-        {
-                gap = right;
-                gap.Sub(left);
-        }
-        else
-        {
-                gap = left;
-                gap.Sub(right);
-        }
-        return gap;
-}
-
-// Convert EcInt to billions using all limbs
-static double EcIntToBillions(const EcInt& val)
-{
-        long double acc = 0.0L;
-        for (int i = 4; i >= 0; --i)
-        {
-                        acc = acc * 18446744073709551616.0L + (long double)val.data[i];
-        }
-        acc /= 1000000000.0L;
-        return (double)acc;
-}
-
-// Convert EcInt to full decimal string (unsigned interpretation)
-static std::string EcIntToDecimal(const EcInt& val)
-{
-        u64 buffer[5];
-        memcpy(buffer, val.data, sizeof(buffer));
-
-        auto isZero = [&]() {
-                for (int i = 0; i < 5; ++i)
-                        if (buffer[i])
-                                return false;
-                return true;
-        };
-
-        if (isZero())
-                return std::string("0");
-
-        std::string result;
-        while (!isZero())
-        {
-                u64 quotient[5] = {0, 0, 0, 0, 0};
-                u64 rem = 0;
-                for (int i = 4; i >= 0; --i)
-                {
-                        __uint128_t cur = ((__uint128_t)rem << 64) | buffer[i];
-                        quotient[i] = (u64)(cur / 10);
-                        rem = (u64)(cur % 10);
-                }
-                result.push_back((char)('0' + rem));
-                memcpy(buffer, quotient, sizeof(buffer));
-        }
-
-        std::reverse(result.begin(), result.end());
-        return result;
-}
-
-static EcInt EstimateKeyFromPair(const DistanceEntry& a, const DistanceEntry& b)
-{
-        bool aIsTame = a.type == TAME;
-        bool bIsTame = b.type == TAME;
-
-        EcInt k_est;
-        if (aIsTame || bIsTame)
-        {
-            const EcInt& tameDist = aIsTame ? a.dist : b.dist;
-            const EcInt& wildDist = aIsTame ? b.dist : a.dist;
-
-            k_est = tameDist;
-            k_est.Sub(wildDist);
-            EcInt mirror = k_est;
-            mirror.Neg();
-
-            // Prefer the non-mirrored candidate but keep the mirrored option
-            EcInt primary = k_est;
-            primary.Add(Int_HalfRange);
-
-            EcInt secondary = mirror;
-            secondary.Add(Int_HalfRange);
-
-            // Choose the candidate that falls inside the search bounds after offset (if set)
-            if (!gStart.IsZero())
-            {
-                    EcInt ofs = gStart;
-                    primary.AddModP(ofs);
-                    secondary.AddModP(ofs);
-            }
-
-            // Select the candidate closer to the middle of the range as a stable heuristic
-            EcInt midpoint = Int_HalfRange;
-            EcInt diffPrimary = AbsDistance(primary, midpoint);
-            EcInt diffSecondary = AbsDistance(secondary, midpoint);
-            k_est = diffPrimary.IsLessThanU(diffSecondary) ? primary : secondary;
-        }
-        else
-        {
-                // Wild1 vs Wild2 pair
-                k_est = a.dist;
-                k_est.Sub(b.dist);
-                if (k_est.data[4] >> 63)
-                        k_est.Neg();
-                k_est.ShiftRight(1);
-                k_est.Add(Int_HalfRange);
-
-                if (!gStart.IsZero())
-                {
-                        EcInt ofs = gStart;
-                        k_est.AddModP(ofs);
-                }
-        }
-
-        return k_est;
-}
-
-static void UpdateGlobalGap(const DistanceEntry& distA, const DistanceEntry& distB)
-{
-        EcInt gap = AbsDistance(distA.dist, distB.dist);
-        if (!gHasLowestGap || gap.IsLessThanU(gLowestGap))
-        {
-                gLowestGap = gap;
-                gHasLowestGap = true;
-
-                gBestDistanceA = distA;
-                gBestDistanceB = distB;
-                gHasGapPair = true;
-
-                gEstimatedKey = EstimateKeyFromPair(distA, distB);
-                gHasEstimatedKey = true;
-        }
-}
-
-static void ConsiderGapWithSet(const DistanceEntry& entry, const std::multiset<DistanceEntry, DistanceEntryLess>& otherHerd)
-{
-        if (otherHerd.empty())
-                return;
-
-        auto it = otherHerd.lower_bound(entry);
-        if (it != otherHerd.end())
-                UpdateGlobalGap(entry, *it);
-
-        if (it != otherHerd.begin())
-        {
-                --it;
-                UpdateGlobalGap(entry, *it);
-        }
-}
-
-// Deserialize 22-byte DP distance into EcInt with sign extension if needed
-static EcInt DeserializeDistance(const u8* dist)
-{
-        EcInt res;
-        memcpy(res.data, dist, 22);
-        // Sign-extend if negative marker is present
-        if (dist[21] == 0xFF)
-                memset(((u8*)res.data) + 22, 0xFF, 18);
-        else
-                memset(((u8*)res.data) + 22, 0, 18);
-        return res;
-}
-
-// Absolute unsigned difference between two EcInt values
-static EcInt AbsDistance(const EcInt& a, const EcInt& b)
-{
-        EcInt left = a;
-        EcInt right = b;
-        EcInt gap;
-        if (left.IsLessThanU(right))
-        {
-                gap = right;
-                gap.Sub(left);
-        }
-        else
-        {
-                gap = left;
-                gap.Sub(right);
-        }
-        return gap;
-}
-
-// Convert EcInt to billions using all limbs
-static double EcIntToBillions(const EcInt& val)
-{
-        long double acc = 0.0L;
-        for (int i = 4; i >= 0; --i)
-        {
-                        acc = acc * 18446744073709551616.0L + (long double)val.data[i];
-        }
-        acc /= 1000000000.0L;
-        return (double)acc;
-}
-
-// Convert EcInt to full decimal string (unsigned interpretation)
-static std::string EcIntToDecimal(const EcInt& val)
-{
-        u64 buffer[5];
-        memcpy(buffer, val.data, sizeof(buffer));
-
-        auto isZero = [&]() {
-                for (int i = 0; i < 5; ++i)
-                        if (buffer[i])
-                                return false;
-                return true;
-        };
-
-        if (isZero())
-                return std::string("0");
-
-        std::string result;
-        while (!isZero())
-        {
-                u64 quotient[5] = {0, 0, 0, 0, 0};
-                u64 rem = 0;
-                for (int i = 4; i >= 0; --i)
-                {
-                        __uint128_t cur = ((__uint128_t)rem << 64) | buffer[i];
-                        quotient[i] = (u64)(cur / 10);
-                        rem = (u64)(cur % 10);
-                }
-                result.push_back((char)('0' + rem));
-                memcpy(buffer, quotient, sizeof(buffer));
-        }
-
-        std::reverse(result.begin(), result.end());
-        return result;
-}
-
-static void UpdateGlobalGap(const EcInt& tameDist, const EcInt& wildDist)
-{
-        EcInt gap = AbsDistance(tameDist, wildDist);
-        if (!gHasLowestGap || gap.IsLessThanU(gLowestGap))
-        {
-                gLowestGap = gap;
-                gHasLowestGap = true;
-
-                gBestTameDistance = tameDist;
-                gBestWildDistance = wildDist;
-                gHasGapPair = true;
-
-                EcInt k_est = tameDist;
-                EcInt wildCopy = wildDist;
-                k_est.Sub(wildCopy);
-                k_est.Add(Int_HalfRange);
-
-                // Convert estimated offset key into an absolute key (like a real collision)
-                if (!gStart.IsZero())
-                {
-                        EcInt ofs = gStart;
-                        k_est.AddModP(ofs);
-                }
-
-                gEstimatedKey = k_est;
-                gHasEstimatedKey = true;
-        }
-}
-
-static void ConsiderGapCandidates(const EcInt& newDist, bool isTame)
-{
-        const std::set<EcInt, EcIntLess>& otherHerd = isTame ? gWildDistances : gTameDistances;
-        if (otherHerd.empty())
-                return;
-
-        auto it = otherHerd.lower_bound(newDist);
-        if (it != otherHerd.end())
-        {
-                if (isTame)
-                        UpdateGlobalGap(newDist, *it);
-                else
-                        UpdateGlobalGap(*it, newDist);
-        }
-
-        if (it != otherHerd.begin())
-        {
-                --it;
-                if (isTame)
-                        UpdateGlobalGap(newDist, *it);
-                else
-                        UpdateGlobalGap(*it, newDist);
         }
 }
 
