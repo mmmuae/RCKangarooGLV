@@ -247,7 +247,8 @@ static EcInt EstimateKeyFromPair(const DistanceEntry& a, const DistanceEntry& b)
         bool hasBest = false;
 
         auto ConsiderCandidate = [&](const EcInt& candidate) {
-                EcPoint P = ec.MultiplyG(candidate);
+                EcInt scalar = candidate;
+                EcPoint P = ec.MultiplyG(scalar);
                 if (P.IsEqual(gPntToSolve))
                 {
                         bestKey = ApplyStartOffset(candidate);
