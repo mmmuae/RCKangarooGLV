@@ -246,18 +246,16 @@ static EcInt EstimateKeyFromPair(const DistanceEntry& a, const DistanceEntry& b)
         EcInt bestDist;
         bool hasBest = false;
 
-        auto ConsiderCandidate = [&](const EcInt& candidateRaw) {
-                EcInt candidate = NormalizeKeyToRange(candidateRaw);
-                EcInt withOffset = ApplyStartOffset(candidate);
-
-                EcInt scalar = withOffset;
+        auto ConsiderCandidate = [&](const EcInt& candidate) {
+                EcInt scalar = candidate;
                 EcPoint P = ec.MultiplyG(scalar);
                 if (P.IsEqual(gPntToSolve))
                 {
-                        bestKey = withOffset;
+                        bestKey = ApplyStartOffset(candidate);
                         return true;
                 }
 
+                EcInt withOffset = ApplyStartOffset(candidate);
                 EcInt dist = AbsDistance(withOffset, gStart);
                 if (!hasBest || dist.IsLessThanU(bestDist))
                 {
