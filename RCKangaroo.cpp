@@ -232,69 +232,111 @@ static bool IsLessThan(const EcInt& a, const EcInt& b)
 
 static EcInt EstimateKeyFromPair(const DistanceEntry& a, const DistanceEntry& b)
 {
+        auto ApplyStartOffset = [](const EcInt& key) {
+                EcInt withOffset = key;
+                if (!gStart.IsZero())
+                {
+                        EcInt ofs = gStart;
+                        withOffset.AddModP(ofs);
+                }
+                return withOffset;
+        };
+
+        EcInt bestKey;
+        EcInt bestDist;
+        bool hasBest = false;
+
+        auto ConsiderCandidate = [&](const EcInt& candidateRaw) {
+                EcInt candidate = NormalizeKeyToRange(candidateRaw);
+                EcInt withOffset = ApplyStartOffset(candidate);
+
+                EcInt scalar = withOffset;
+                EcPoint P = ec.MultiplyG(scalar);
+                if (P.IsEqual(gPntToSolve))
+                {
+                        bestKey = withOffset;
+                        return true;
+                }
+
+                EcInt dist = AbsDistance(withOffset, gStart);
+                if (!hasBest || dist.IsLessThanU(bestDist))
+                {
+                        bestKey = withOffset;
+                        bestDist = dist;
+                        hasBest = true;
+                }
+                return false;
+        };
+
+        auto EvaluateTameWild = [&](const EcInt& tameDist, const EcInt& wildDist, bool negateTame) {
+                EcInt t = tameDist;
+                EcInt w = wildDist;
+                if (negateTame)
+                        t.Neg();
+
+                EcInt diff = t;
+                diff.Sub(w);
+
+                EcInt candidate = diff;
+                candidate.Add(Int_HalfRange);
+                if (ConsiderCandidate(candidate))
+                        return true;
+
+                EcInt altCandidate = diff;
+                altCandidate.Neg();
+                altCandidate.Add(Int_HalfRange);
+                return ConsiderCandidate(altCandidate);
+        };
+
+        auto EvaluateWildPair = [&](const EcInt& firstWild, const EcInt& secondWild, bool negateFirst) {
+                EcInt t = firstWild;
+                EcInt w = secondWild;
+                if (negateFirst)
+                        t.Neg();
+
+                EcInt diff = t;
+                diff.Sub(w);
+                if (diff.data[4] >> 63)
+                        diff.Neg();
+
+                diff.ShiftRight(1);
+
+                EcInt candidate = diff;
+                candidate.Add(Int_HalfRange);
+                if (ConsiderCandidate(candidate))
+                        return true;
+
+                EcInt altCandidate = diff;
+                altCandidate.Neg();
+                altCandidate.Add(Int_HalfRange);
+                return ConsiderCandidate(altCandidate);
+        };
+
         bool aIsTame = a.type == TAME;
         bool bIsTame = b.type == TAME;
 
-        EcInt k_est;
         if (aIsTame || bIsTame)
         {
-                EcInt tameDist = aIsTame ? a.dist : b.dist;
-                EcInt wildDist = aIsTame ? b.dist : a.dist;
+                        EcInt tameDist = aIsTame ? a.dist : b.dist;
+                        EcInt wildDist = aIsTame ? b.dist : a.dist;
 
-                EcInt diff = tameDist;
-                diff.Sub(wildDist);
-
-                EcInt primary = diff;
-                primary.Add(Int_HalfRange);
-
-                EcInt secondary = diff;
-                secondary.Neg();
-                secondary.Add(Int_HalfRange);
-
-                if (!gStart.IsZero())
-                {
-                        EcInt ofs = gStart;
-                        primary.AddModP(ofs);
-                        secondary.AddModP(ofs);
-                }
-
-                EcInt distPrimary = AbsDistance(primary, gStart);
-                EcInt distSecondary = AbsDistance(secondary, gStart);
-                k_est = IsLessThan(distPrimary, distSecondary) ? primary : secondary;
+                        if (EvaluateTameWild(tameDist, wildDist, false))
+                                return bestKey;
+                        EvaluateTameWild(tameDist, wildDist, true);
         }
         else
         {
-                EcInt d1 = a.dist;
-                EcInt d2 = b.dist;
-                EcInt diff = d1;
-                diff.Sub(d2);
-
-                EcInt absDiff = diff;
-                if (absDiff.data[4] >> 63)
-                        absDiff.Neg();
-
-                EcInt primary = absDiff;
-                primary.ShiftRight(1);
-                primary.Add(Int_HalfRange);
-
-                EcInt secondary = absDiff;
-                secondary.Neg();
-                secondary.ShiftRight(1);
-                secondary.Add(Int_HalfRange);
-
-                if (!gStart.IsZero())
-                {
-                        EcInt ofs = gStart;
-                        primary.AddModP(ofs);
-                        secondary.AddModP(ofs);
-                }
-
-                EcInt distPrimary = AbsDistance(primary, gStart);
-                EcInt distSecondary = AbsDistance(secondary, gStart);
-                k_est = IsLessThan(distPrimary, distSecondary) ? primary : secondary;
+                        if (EvaluateWildPair(a.dist, b.dist, false))
+                                return bestKey;
+                        EvaluateWildPair(a.dist, b.dist, true);
         }
 
-        return NormalizeKeyToRange(k_est);
+        if (!hasBest)
+        {
+                bestKey.SetZero();
+        }
+
+        return bestKey;
 }
 
 static void UpdateGlobalGap(const DistanceEntry& distA, const DistanceEntry& distB)
