@@ -236,6 +236,10 @@ static EcInt EstimateKeyFromPair(const DistanceEntry& a, const DistanceEntry& b)
         bool bIsTame = b.type == TAME;
 
         EcInt k_est;
+        // Track normalized candidates so comparisons are consistent with the
+        // configured search range
+        EcInt normalizedPrimary;
+        EcInt normalizedSecondary;
         if (aIsTame || bIsTame)
         {
                 EcInt tameDist = aIsTame ? a.dist : b.dist;
@@ -258,9 +262,12 @@ static EcInt EstimateKeyFromPair(const DistanceEntry& a, const DistanceEntry& b)
                         secondary.AddModP(ofs);
                 }
 
-                EcInt distPrimary = AbsDistance(primary, gStart);
-                EcInt distSecondary = AbsDistance(secondary, gStart);
-                k_est = IsLessThan(distPrimary, distSecondary) ? primary : secondary;
+                normalizedPrimary = NormalizeKeyToRange(primary);
+                normalizedSecondary = NormalizeKeyToRange(secondary);
+
+                EcInt distPrimary = AbsDistance(normalizedPrimary, gStart);
+                EcInt distSecondary = AbsDistance(normalizedSecondary, gStart);
+                k_est = IsLessThan(distPrimary, distSecondary) ? normalizedPrimary : normalizedSecondary;
         }
         else
         {
@@ -289,9 +296,12 @@ static EcInt EstimateKeyFromPair(const DistanceEntry& a, const DistanceEntry& b)
                         secondary.AddModP(ofs);
                 }
 
-                EcInt distPrimary = AbsDistance(primary, gStart);
-                EcInt distSecondary = AbsDistance(secondary, gStart);
-                k_est = IsLessThan(distPrimary, distSecondary) ? primary : secondary;
+                normalizedPrimary = NormalizeKeyToRange(primary);
+                normalizedSecondary = NormalizeKeyToRange(secondary);
+
+                EcInt distPrimary = AbsDistance(normalizedPrimary, gStart);
+                EcInt distSecondary = AbsDistance(normalizedSecondary, gStart);
+                k_est = IsLessThan(distPrimary, distSecondary) ? normalizedPrimary : normalizedSecondary;
         }
 
         return NormalizeKeyToRange(k_est);
