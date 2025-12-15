@@ -4,6 +4,8 @@
 // https://github.com/RetiredC
 
 
+#include <cmath>
+#include <cstring>
 #include <iostream>
 #include "cuda_runtime.h"
 #include "cuda.h"
@@ -16,12 +18,73 @@ void CallGpuKernelABC(TKparams Kparams);
 void AddPointsToList(u32* data, int cnt, u64 ops_cnt);
 extern bool gGenMode; //tames generation mode
 
+RCGpuKang::RCGpuKang()
+    : StopFlag(false), PntToSolve{}, RangeBits(0), DP(0), ec{}, DPs_out(nullptr), Kparams{}, HalfRange{}, RangeWidth{}, TameOffset{}, PntHalfRange{},
+      NegPntHalfRange{}, RndPnts(nullptr), EcJumps1(nullptr), EcJumps2(nullptr), EcJumps3(nullptr), PntA{}, PntB{}, cur_stats_ind(0), persistingL2CacheMaxSize(0),
+      CudaIndex(0), VramBytes(0), mpCnt(0), KangCnt(0), Failed(false), IsOldGpu(false)
+{
+        memset(SpeedStats, 0, sizeof(SpeedStats));
+        memset(dbg, 0, sizeof(dbg));
+}
+
 int RCGpuKang::CalcKangCnt()
 {
-	Kparams.BlockCnt = mpCnt;
-	Kparams.BlockSize = IsOldGpu ? 512 : 256;
-	Kparams.GroupCnt = IsOldGpu ? 64 : 24;
-	return Kparams.BlockSize* Kparams.GroupCnt* Kparams.BlockCnt;
+        Kparams.BlockSize = IsOldGpu ? 512 : 256;
+        Kparams.GroupCnt = IsOldGpu ? 64 : 24;
+
+        int blockCnt = mpCnt;
+
+        size_t base_mem = MAX_DP_CNT * GPU_DP_SIZE + 16; //DPs_out
+        base_mem += 3 * JMP_CNT * 96; //jumps tables
+        base_mem += 1024; //dbg_buf
+        base_mem += 8; //LoopedKangs header
+
+        size_t per_kang = 96; //Kangs
+        if (!IsOldGpu)
+                per_kang += 96; //L2 stash
+        per_kang += STEP_CNT * sizeof(u16); //JumpsList
+        per_kang += (size_t)(16 * DPTABLE_MAX_CNT + sizeof(u32)); //DPTable entries + counter
+        per_kang += MD_LEN * 64; //LastPnts
+        per_kang += MD_LEN * sizeof(u64); //LoopTable
+        per_kang += sizeof(u32); //LoopedKangs per kang
+        per_kang += (8 + Kparams.GroupCnt - 1) / Kparams.GroupCnt; //L1S2 overhead per kang
+
+        size_t vram_cap = (VramBytes * 9) / 10; //leave headroom
+        size_t max_kang = 0;
+        if (vram_cap > base_mem && per_kang)
+                max_kang = (vram_cap - base_mem) / per_kang;
+
+        int stride = Kparams.BlockSize * Kparams.GroupCnt;
+        int min_block_by_dp = 1;
+        if (RangeBits > 0 && DP > 0 && stride)
+        {
+                double ops = 1.15 * pow(2.0, RangeBits / 2.0);
+                double dp_val = (double)(1ull << DP);
+                double kang_needed = ceil((ops / dp_val) / (double)DPTABLE_MAX_CNT);
+                if (kang_needed < 1.0)
+                        kang_needed = 1.0;
+                min_block_by_dp = (int)ceil(kang_needed / (double)stride);
+                if (min_block_by_dp < 1)
+                        min_block_by_dp = 1;
+        }
+
+        if (min_block_by_dp > blockCnt)
+                blockCnt = min_block_by_dp;
+
+        if (max_kang && stride)
+        {
+                int max_block_by_mem = (int)(max_kang / stride);
+                if (max_block_by_mem == 0)
+                        max_block_by_mem = 1;
+                if (max_block_by_mem < blockCnt)
+                        blockCnt = max_block_by_mem;
+        }
+
+        if (blockCnt < 1)
+                blockCnt = 1;
+
+        Kparams.BlockCnt = blockCnt;
+        return Kparams.BlockSize * Kparams.GroupCnt * Kparams.BlockCnt;
 }
 
 //executes in main thread
@@ -46,12 +109,9 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _RangeBits, int _DP, EcInt _Ran
 	if (err != cudaSuccess)
 		return false;
 
-	Kparams.BlockCnt = mpCnt;
-	Kparams.BlockSize = IsOldGpu ? BLOCK_SIZE_OLD_GPU : BLOCK_SIZE_NEW_GPU;
-	Kparams.GroupCnt = IsOldGpu ? PNT_GROUP_OLD_GPU : PNT_GROUP_NEW_GPU;
-	KangCnt = Kparams.BlockSize * Kparams.GroupCnt * Kparams.BlockCnt;
-	Kparams.KangCnt = KangCnt;
-	Kparams.DP = DP;
+        KangCnt = CalcKangCnt();
+        Kparams.KangCnt = KangCnt;
+        Kparams.DP = DP;
 	Kparams.KernelA_LDS_Size = 64 * JMP_CNT + 16 * Kparams.BlockSize;
 	Kparams.KernelB_LDS_Size = 64 * JMP_CNT;
 	Kparams.KernelC_LDS_Size = 96 * JMP_CNT;
@@ -148,7 +208,7 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _RangeBits, int _DP, EcInt _Ran
 		return false;
 	}
 
-	size = mpCnt * Kparams.BlockSize * sizeof(u64);
+        size = Kparams.BlockCnt * Kparams.BlockSize * sizeof(u64);
 	total_mem += size;
 	err = cudaMalloc((void**)&Kparams.L1S2, size);
 	if (err != cudaSuccess)
@@ -383,7 +443,7 @@ bool RCGpuKang::Start()
 	}
 	CallGpuKernelGen(Kparams);
 
-	err = cudaMemset(Kparams.L1S2, 0, mpCnt * Kparams.BlockSize * 8);
+        err = cudaMemset(Kparams.L1S2, 0, Kparams.BlockCnt * Kparams.BlockSize * 8);
 	if (err != cudaSuccess)
 		return false;
 	cudaMemset(Kparams.dbg_buf, 0, 1024);
@@ -394,7 +454,7 @@ bool RCGpuKang::Start()
 #ifdef DEBUG_MODE
 int RCGpuKang::Dbg_CheckKangs()
 {
-	int kang_size = mpCnt * Kparams.BlockSize * Kparams.GroupCnt * 96;
+        int kang_size = Kparams.BlockCnt * Kparams.BlockSize * Kparams.GroupCnt * 96;
 	u64* kangs = (u64*)malloc(kang_size);
 	cudaError_t err = cudaMemcpy(kangs, Kparams.Kangs, kang_size, cudaMemcpyDeviceToHost);
 	int res = 0;

@@ -59,10 +59,12 @@ private:
 	int Dbg_CheckKangs();
 #endif
 public:
+        RCGpuKang();
         int persistingL2CacheMaxSize;
         int CudaIndex; //gpu index in cuda
-	int mpCnt;
-	int KangCnt;
+        u64 VramBytes;
+        int mpCnt;
+        int KangCnt;
         bool Failed;
         bool IsOldGpu;
 
