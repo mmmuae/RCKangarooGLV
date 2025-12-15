@@ -158,17 +158,15 @@ __global__ void KernelA(const TKparams Kparams)
 				jmp_ind |= JMP2_FLAG;
 			}
 			
-                        if ((x[3] & dp_mask64) == 0)
-                        {
-                                u32 kang_ind = (THREAD_X + BLOCK_X * BLOCK_SIZE) * PNT_GROUP_CNT + group;
-                                u32 ind = atomicAdd(Kparams.DPTable + kang_ind, 1);
-                                if (ind < DPTABLE_MAX_CNT)
-                                {
-                                        int4* dst = (int4*)(Kparams.DPTable + Kparams.KangCnt + (kang_ind * DPTABLE_MAX_CNT + ind) * 4);
-                                        dst[0] = ((int4*)x)[0];
-                                        jmp_ind |= DP_FLAG;
-                                }
-                        }
+			if ((x[3] & dp_mask64) == 0)
+			{
+				u32 kang_ind = (THREAD_X + BLOCK_X * BLOCK_SIZE) * PNT_GROUP_CNT + group;
+				u32 ind = atomicAdd(Kparams.DPTable + kang_ind, 1);
+				ind = min(ind, DPTABLE_MAX_CNT - 1);
+				int4* dst = (int4*)(Kparams.DPTable + Kparams.KangCnt + (kang_ind * DPTABLE_MAX_CNT + ind) * 4);
+				dst[0] = ((int4*)x)[0];
+				jmp_ind |= DP_FLAG;
+			}
 
 			lds_jlist[8 * THREAD_X + (group % 8)] = jmp_ind;
 			if ((group % 8) == 0)
@@ -398,17 +396,15 @@ __global__ void KernelA(const TKparams Kparams)
 				jmp_ind |= JMP2_FLAG;
 			}
 
-                        if ((x[3] & dp_mask64) == 0)
-                        {
-                                u32 kang_ind = (THREAD_X + BLOCK_X * BLOCK_SIZE) * PNT_GROUP_CNT + group;
-                                u32 ind = atomicAdd(Kparams.DPTable + kang_ind, 1);
-                                if (ind < DPTABLE_MAX_CNT)
-                                {
-                                        int4* dst = (int4*)(Kparams.DPTable + Kparams.KangCnt + (kang_ind * DPTABLE_MAX_CNT + ind) * 4);
-                                        dst[0] = ((int4*)x)[0];
-                                        jmp_ind |= DP_FLAG;
-                                }
-                        }
+			if ((x[3] & dp_mask64) == 0)
+			{
+				u32 kang_ind = (THREAD_X + BLOCK_X * BLOCK_SIZE) * PNT_GROUP_CNT + group;
+				u32 ind = atomicAdd(Kparams.DPTable + kang_ind, 1);
+				ind = min(ind, DPTABLE_MAX_CNT - 1);
+				int4* dst = (int4*)(Kparams.DPTable + Kparams.KangCnt + (kang_ind * DPTABLE_MAX_CNT + ind) * 4);
+				dst[0] = ((int4*)x)[0];
+				jmp_ind |= DP_FLAG;
+			}
 
 			lds_jlist[8 * THREAD_X + (group % 8)] = jmp_ind;
 			if (((group + jlast_add) % 8) == 0)
@@ -488,19 +484,18 @@ __global__ void KernelA(const TKparams Kparams)
 
 __device__ __forceinline__ void BuildDP(const TKparams& Kparams, int kang_ind, u64* d)
 {
-        int ind = atomicAdd(Kparams.DPTable + kang_ind, 0x10000);
-        ind >>= 16;
-        if (ind >= DPTABLE_MAX_CNT)
-                return;
-        int4 rx = *(int4*)(Kparams.DPTable + Kparams.KangCnt + (kang_ind * DPTABLE_MAX_CNT + ind) * 4);
-        u32 pos = atomicAdd(Kparams.DPs_out, 1);
-        if (pos >= MAX_DP_CNT)
-                return;
-        u32* DPs = Kparams.DPs_out + 4 + pos * GPU_DP_SIZE / 4;
-        *(int4*)&DPs[0] = rx;
-        *(int4*)&DPs[4] = ((int4*)d)[0];
-        *(u64*)&DPs[8] = d[2];
-        DPs[10] = 3 * kang_ind / Kparams.KangCnt; //kang type
+	int ind = atomicAdd(Kparams.DPTable + kang_ind, 0x10000);
+	ind >>= 16;
+	if (ind >= DPTABLE_MAX_CNT)
+		return;
+	int4 rx = *(int4*)(Kparams.DPTable + Kparams.KangCnt + (kang_ind * DPTABLE_MAX_CNT + ind) * 4);
+	u32 pos = atomicAdd(Kparams.DPs_out, 1);
+	pos = min(pos, MAX_DP_CNT - 1);
+	u32* DPs = Kparams.DPs_out + 4 + pos * GPU_DP_SIZE / 4;
+	*(int4*)&DPs[0] = rx;
+	*(int4*)&DPs[4] = ((int4*)d)[0];
+	*(u64*)&DPs[8] = d[2];
+	DPs[10] = 3 * kang_ind / Kparams.KangCnt; //kang type
 }
 
 __device__ __forceinline__ bool ProcessJumpDistance(u32 step_ind, u32 d_cur, u64* d, u32 kang_ind, u64* jmp1_d, u64* jmp2_d, const TKparams& Kparams, u64* table, u32* cur_ind, u8 iter)
