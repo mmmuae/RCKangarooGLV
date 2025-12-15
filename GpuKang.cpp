@@ -49,7 +49,7 @@ int RCGpuKang::CalcKangCnt()
         per_kang += sizeof(u32); //LoopedKangs per kang
         per_kang += (8 + Kparams.GroupCnt - 1) / Kparams.GroupCnt; //L1S2 overhead per kang
 
-        size_t vram_cap = (VramBytes * 95) / 100; //leave a smaller headroom to fit more parallel kangaroos
+        size_t vram_cap = (VramBytes * 9) / 10; //leave headroom
         size_t max_kang = 0;
         if (vram_cap > base_mem && per_kang)
                 max_kang = (vram_cap - base_mem) / per_kang;
