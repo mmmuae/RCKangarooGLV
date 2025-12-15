@@ -61,9 +61,8 @@ private:
 public:
         int persistingL2CacheMaxSize;
         int CudaIndex; //gpu index in cuda
-        u64 VramBytes;
-        int mpCnt;
-        int KangCnt;
+	int mpCnt;
+	int KangCnt;
         bool Failed;
         bool IsOldGpu;
 

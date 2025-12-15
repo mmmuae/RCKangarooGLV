@@ -423,13 +423,12 @@ void InitGpus()
 
 		cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync);
 
-                GpuKangs[GpuCnt] = new RCGpuKang();
-                GpuKangs[GpuCnt]->CudaIndex = i;
-                GpuKangs[GpuCnt]->persistingL2CacheMaxSize = deviceProp.persistingL2CacheMaxSize;
-                GpuKangs[GpuCnt]->VramBytes = deviceProp.totalGlobalMem;
-                GpuKangs[GpuCnt]->mpCnt = deviceProp.multiProcessorCount;
-                GpuKangs[GpuCnt]->IsOldGpu = deviceProp.l2CacheSize < 16 * 1024 * 1024;
-                GpuCnt++;
+		GpuKangs[GpuCnt] = new RCGpuKang();
+		GpuKangs[GpuCnt]->CudaIndex = i;
+		GpuKangs[GpuCnt]->persistingL2CacheMaxSize = deviceProp.persistingL2CacheMaxSize;
+		GpuKangs[GpuCnt]->mpCnt = deviceProp.multiProcessorCount;
+		GpuKangs[GpuCnt]->IsOldGpu = deviceProp.l2CacheSize < 16 * 1024 * 1024;
+		GpuCnt++;
 	}
 	printf("Total GPUs for work: %d\r\n", GpuCnt);
 }
