@@ -59,7 +59,6 @@ private:
 	int Dbg_CheckKangs();
 #endif
 public:
-        RCGpuKang();
         int persistingL2CacheMaxSize;
         int CudaIndex; //gpu index in cuda
         u64 VramBytes;
