@@ -61,7 +61,7 @@ typedef char i8;
 
 #define JMP_MASK			(JMP_CNT-1)
 
-#define DPTABLE_MAX_CNT		16
+#define DPTABLE_MAX_CNT		128
 
 #define MAX_CNT_LIST		(512 * 1024)
 
@@ -100,4 +100,5 @@ struct TKparams
 	u32 KernelB_LDS_Size;
 	u32 KernelC_LDS_Size;	
 };
+
 
