@@ -61,7 +61,7 @@ typedef char i8;
 
 #define JMP_MASK			(JMP_CNT-1)
 
-#define DPTABLE_MAX_CNT		16
+#define DPTABLE_MAX_CNT		256
 
 #define MAX_CNT_LIST		(512 * 1024)
 
