@@ -4,6 +4,8 @@
 // https://github.com/RetiredC
 
 
+#include <cmath>
+#include <cstring>
 #include <iostream>
 #include "cuda_runtime.h"
 #include "cuda.h"
@@ -15,6 +17,15 @@ void CallGpuKernelGen(TKparams Kparams);
 void CallGpuKernelABC(TKparams Kparams);
 void AddPointsToList(u32* data, int cnt, u64 ops_cnt);
 extern bool gGenMode; //tames generation mode
+
+RCGpuKang::RCGpuKang()
+    : StopFlag(false), PntToSolve{}, RangeBits(0), DP(0), ec{}, DPs_out(nullptr), Kparams{}, HalfRange{}, RangeWidth{}, TameOffset{}, PntHalfRange{},
+      NegPntHalfRange{}, RndPnts(nullptr), EcJumps1(nullptr), EcJumps2(nullptr), EcJumps3(nullptr), PntA{}, PntB{}, cur_stats_ind(0), persistingL2CacheMaxSize(0),
+      CudaIndex(0), VramBytes(0), mpCnt(0), KangCnt(0), Failed(false), IsOldGpu(false)
+{
+        memset(SpeedStats, 0, sizeof(SpeedStats));
+        memset(dbg, 0, sizeof(dbg));
+}
 
 int RCGpuKang::CalcKangCnt()
 {
@@ -44,6 +55,22 @@ int RCGpuKang::CalcKangCnt()
                 max_kang = (vram_cap - base_mem) / per_kang;
 
         int stride = Kparams.BlockSize * Kparams.GroupCnt;
+        int min_block_by_dp = 1;
+        if (RangeBits > 0 && DP > 0 && stride)
+        {
+                double ops = 1.15 * pow(2.0, RangeBits / 2.0);
+                double dp_val = (double)(1ull << DP);
+                double kang_needed = ceil((ops / dp_val) / (double)DPTABLE_MAX_CNT);
+                if (kang_needed < 1.0)
+                        kang_needed = 1.0;
+                min_block_by_dp = (int)ceil(kang_needed / (double)stride);
+                if (min_block_by_dp < 1)
+                        min_block_by_dp = 1;
+        }
+
+        if (min_block_by_dp > blockCnt)
+                blockCnt = min_block_by_dp;
+
         if (max_kang && stride)
         {
                 int max_block_by_mem = (int)(max_kang / stride);
