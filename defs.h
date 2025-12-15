@@ -57,7 +57,7 @@ typedef char i8;
 #define WILD2				2  // Wild kangs2
 
 #define GPU_DP_SIZE			48
-#define MAX_DP_CNT			(256 * 1024)
+#define MAX_DP_CNT			(8 * 1024 * 1024) // GPU DP staging buffer (~384 MB)
 
 #define JMP_MASK			(JMP_CNT-1)
 
