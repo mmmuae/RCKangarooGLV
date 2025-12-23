@@ -715,13 +715,16 @@ void ShowStats(u64 tm_start, double exp_ops, double dp_val, u64 total_ops)
                 sprintf(keyStr, "N/A");
         }
 
+	double speed_mks = (double)speed;
+	double count_log2 = 0.0;
+	if (total_ops > 0)
+		count_log2 = log2((double)total_ops);
+
 	// Use carriage return for sticky progress bar (updates in place)
-	printf("\r%sSpeed: %d MKeys/s, Err: %d, DPs: %lluK/%lluK, T/W: %.3f, l.gap: %s, k_est: %s, Time: %llud:%02dh:%02dm/%llud:%02dh:%02dm         ",
-		gGenMode ? "GEN: " : (IsBench ? "BENCH: " : "MAIN: "),
-		speed,
+	printf("\r[%.2f MK/s][Count 2^%.2f][Dead %u][T/W:%.3f][L.Gap:%s][k_est:%s][%llud:%02dh:%02dm/%llud:%02dh:%02dm]  ",
+		speed_mks,
+		count_log2,
 		gTotalErrors,
-		db.GetBlockCnt()/1000,
-		est_dps_cnt/1000,
 		twRatio,
 		gapStr,
 		keyStr,
@@ -744,7 +747,7 @@ bool SolvePoint(EcPoint PntToSolve, EcInt& RangeWidth, int RangeBits, int DP, Ec
         }
 
         int RangeWidthBits = GetBitLength(RangeWidth);
-        printf("\r\nSolving point: Range %d bits (width bits %d), DP %d, start...\r\n", RangeBits, RangeWidthBits, DP);
+	printf("\r\nSolving point: Range %d bits (width bits %d), DP %d, start...\r\n", RangeBits, RangeWidthBits, DP);
         double ops = 1.15 * pow(2.0, RangeBits / 2.0);
 	double dp_val = (double)(1ull << DP);
 	double ram = (32 + 4 + 4) * ops / dp_val; //+4 for grow allocation and memory fragmentation
@@ -765,6 +768,15 @@ bool SolvePoint(EcPoint PntToSolve, EcInt& RangeWidth, int RangeBits, int DP, Ec
 	u64 total_kangs = GpuKangs[0]->CalcKangCnt();
 	for (int i = 1; i < GpuCnt; i++)
 		total_kangs += GpuKangs[i]->CalcKangCnt();
+
+	u64 dp_mask = ~((1ull << (64 - DP)) - 1);
+	printf("Number of CPU thread: 0\r\n");
+	printf("Range width: 2^%d\r\n", RangeBits);
+	printf("Number of kangaroos: 2^%.2f\r\n", log2((double)total_kangs));
+	printf("Suggested DP: %d\r\n", DP);
+	printf("Expected operations: 2^%.2f\r\n", log2(ops));
+	printf("Expected RAM: %.1fMB\r\n", ram * 1024.0);
+	printf("DP size: %d [0x%016llX]\r\n", DP, (unsigned long long)dp_mask);
 	double path_single_kang = ops / total_kangs;	
 	double DPs_per_kang = path_single_kang / dp_val;
 	printf("Estimated DPs per kangaroo: %.3f.%s\r\n", DPs_per_kang, (DPs_per_kang < 5) ? " DP overhead is big, use less DP value if possible!" : "");
@@ -901,6 +913,7 @@ bool SolvePoint(EcPoint PntToSolve, EcInt& RangeWidth, int RangeBits, int DP, Ec
 		{
 			gIsOpsLimit = true;
 			printf("\n\rOperations limit reached\r\n");
+			printf("Aborted !\r\n");
 			break;
 		}
 	}
@@ -1269,7 +1282,8 @@ int main(int argc, char* argv[])
 		//happy end
 		char s[100];
 		pk_found.GetHexStr(s);
-		printf("\r\nPRIVATE KEY: %s\r\n\r\n", s);
+		printf("\r\nPRIVATE KEY: %s\r\n", s);
+		printf("Priv: 0x%s\r\n\r\n", s);
 		FILE* fp = fopen("RESULTS.TXT", "a");
 		if (fp)
 		{
