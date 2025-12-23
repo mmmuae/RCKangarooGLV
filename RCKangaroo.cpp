@@ -975,6 +975,7 @@ bool ParseCommandLine(int argc, char* argv[])
 			printf("  --start-dec <dec>           Range start (decimal)\r\n");
 			printf("  --end-dec <dec>             Range end (decimal)\r\n");
 			printf("  -pubkey <hex>               Public key (hex)\r\n");
+			printf("  --pubkey <hex>              Public key (hex)\r\n");
 			printf("  -tames <file>               Tames filename\r\n");
 			printf("  -m <value>                  Max ops limit (for tames generation)\r\n");
 			printf("  -h, --help                  Show this help\r\n");
@@ -1102,16 +1103,16 @@ bool ParseCommandLine(int argc, char* argv[])
                         gEndSet = true;
                 }
                 else
-                if (strcmp(argument, "-pubkey") == 0)
+                if (strcmp(argument, "-pubkey") == 0 || strcmp(argument, "--pubkey") == 0)
                 {
 			if (ci >= argc)
 			{
-				printf("error: missed value after -pubkey option\r\n");
+				printf("error: missed value after --pubkey option\r\n");
 				return false;
 			}
                         if (!gPubKey.SetHexStr(argv[ci]))
 			{
-				printf("error: invalid value for -pubkey option\r\n");
+				printf("error: invalid value for --pubkey option\r\n");
 				return false;
 			}
 			ci++;
@@ -1350,4 +1351,3 @@ label_end:
 	free(pPntList2);
 	free(pPntList);
 }
-
