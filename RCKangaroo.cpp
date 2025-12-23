@@ -596,13 +596,11 @@ void CheckNewPoints()
                         {
                                 gWild1Distances.insert(entry);
                                 ConsiderGapWithSet(entry, gTameDistances);
-                                ConsiderGapWithSet(entry, gWild2Distances);
                         }
                         else
                         {
                                 gWild2Distances.insert(entry);
                                 ConsiderGapWithSet(entry, gTameDistances);
-                                ConsiderGapWithSet(entry, gWild1Distances);
                         }
                 }
 
