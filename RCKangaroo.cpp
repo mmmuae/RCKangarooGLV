@@ -152,7 +152,8 @@ static EcInt ModularShortestDistance(const EcInt& a, const EcInt& b)
                 return AbsDistance(a, b);
 
         EcInt diff = a;
-        diff.Sub(b);
+        EcInt rhs = b;
+        diff.Sub(rhs);
         if (diff.data[4] >> 63)
         {
                 EcInt width = gRangeWidth;
