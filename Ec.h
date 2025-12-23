@@ -18,6 +18,7 @@ public:
 	void Set(u64 val);
 	void SetZero();
 	bool SetHexStr(const char* str);
+	bool SetDecStr(const char* str);
 	void GetHexStr(char* str);
 	u16 GetU16(int index);
 

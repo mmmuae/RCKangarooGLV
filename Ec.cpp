@@ -360,6 +360,35 @@ bool EcInt::SetHexStr(const char* str)
 	return true;
 }
 
+bool EcInt::SetDecStr(const char* str)
+{
+	SetZero();
+	int len = (int)strlen(str);
+	if (len == 0)
+		return false;
+	for (int i = 0; i < len; i++)
+	{
+		char c = str[i];
+		if ((c < '0') || (c > '9'))
+			return false;
+		u64 tmp[5];
+		Mul320_by_64(data, 10, tmp);
+		memcpy(data, tmp, sizeof(data));
+		if (data[4] != 0)
+			return false;
+		if (c != '0')
+		{
+			EcInt digit;
+			digit.Set((u64)(c - '0'));
+			if (Add(digit))
+				return false;
+			if (data[4] != 0)
+				return false;
+		}
+	}
+	return true;
+}
+
 void EcInt::GetHexStr(char* str)
 {
 	for (int i = 0; i < 32; i++)

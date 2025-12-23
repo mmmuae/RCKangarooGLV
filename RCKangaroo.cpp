@@ -951,6 +951,22 @@ bool ParseCommandLine(int argc, char* argv[])
 	{
 		char* argument = argv[ci];
 		ci++;
+		if ((strcmp(argument, "-h") == 0) || (strcmp(argument, "--help") == 0))
+		{
+			printf("Usage: RCKangaroo [options]\r\n");
+			printf("Options:\r\n");
+			printf("  -gpu <mask>                 GPU indices mask, e.g. 012\r\n");
+			printf("  -d <bits>                   DP bits (14..60)\r\n");
+			printf("  --start-hex <hex>           Range start (hex)\r\n");
+			printf("  --end-hex <hex>             Range end (hex)\r\n");
+			printf("  --start-dec <dec>           Range start (decimal)\r\n");
+			printf("  --end-dec <dec>             Range end (decimal)\r\n");
+			printf("  -pubkey <hex>               Public key (hex)\r\n");
+			printf("  -tames <file>               Tames filename\r\n");
+			printf("  -m <value>                  Max ops limit (for tames generation)\r\n");
+			printf("  -h, --help                  Show this help\r\n");
+			return false;
+		}
 		if (strcmp(argument, "-gpu") == 0)
 		{
 			if (ci >= argc)
@@ -972,34 +988,101 @@ bool ParseCommandLine(int argc, char* argv[])
 			}
 		}
 		else
-		if (strcmp(argument, "-dp") == 0)
+		if (strcmp(argument, "-d") == 0)
 		{
+			if (ci >= argc)
+			{
+				printf("error: missed value after -d option\r\n");
+				return false;
+			}
 			int val = atoi(argv[ci]);
 			ci++;
 			if ((val < 14) || (val > 60))
 			{
-				printf("error: invalid value for -dp option\r\n");
+				printf("error: invalid value for -d option\r\n");
 				return false;
 			}
 			gDP = val;
 		}
 		else
-                if (strcmp(argument, "-start") == 0)
+                if (strcmp(argument, "--start-hex") == 0)
                 {
+			if (ci >= argc)
+			{
+				printf("error: missed value after --start-hex option\r\n");
+				return false;
+			}
+			if (gStartSet)
+			{
+				printf("error: start range already specified\r\n");
+				return false;
+			}
                         if (!gStart.SetHexStr(argv[ci]))
 			{
-				printf("error: invalid value for -start option\r\n");
+				printf("error: invalid value for --start-hex option\r\n");
 				return false;
 			}
                         ci++;
                         gStartSet = true;
                 }
                 else
-                if (strcmp(argument, "-end") == 0)
+                if (strcmp(argument, "--end-hex") == 0)
                 {
+			if (ci >= argc)
+			{
+				printf("error: missed value after --end-hex option\r\n");
+				return false;
+			}
+			if (gEndSet)
+			{
+				printf("error: end range already specified\r\n");
+				return false;
+			}
                         if (!gEnd.SetHexStr(argv[ci]))
                         {
-                                printf("error: invalid value for -end option\r\n");
+                                printf("error: invalid value for --end-hex option\r\n");
+                                return false;
+                        }
+                        ci++;
+                        gEndSet = true;
+                }
+		else
+                if (strcmp(argument, "--start-dec") == 0)
+                {
+			if (ci >= argc)
+			{
+				printf("error: missed value after --start-dec option\r\n");
+				return false;
+			}
+			if (gStartSet)
+			{
+				printf("error: start range already specified\r\n");
+				return false;
+			}
+                        if (!gStart.SetDecStr(argv[ci]))
+			{
+				printf("error: invalid value for --start-dec option\r\n");
+				return false;
+			}
+                        ci++;
+                        gStartSet = true;
+                }
+                else
+                if (strcmp(argument, "--end-dec") == 0)
+                {
+			if (ci >= argc)
+			{
+				printf("error: missed value after --end-dec option\r\n");
+				return false;
+			}
+			if (gEndSet)
+			{
+				printf("error: end range already specified\r\n");
+				return false;
+			}
+                        if (!gEnd.SetDecStr(argv[ci]))
+                        {
+                                printf("error: invalid value for --end-dec option\r\n");
                                 return false;
                         }
                         ci++;
@@ -1008,6 +1091,11 @@ bool ParseCommandLine(int argc, char* argv[])
                 else
                 if (strcmp(argument, "-pubkey") == 0)
                 {
+			if (ci >= argc)
+			{
+				printf("error: missed value after -pubkey option\r\n");
+				return false;
+			}
                         if (!gPubKey.SetHexStr(argv[ci]))
 			{
 				printf("error: invalid value for -pubkey option\r\n");
@@ -1018,17 +1106,27 @@ bool ParseCommandLine(int argc, char* argv[])
 		else
 		if (strcmp(argument, "-tames") == 0)
 		{
+			if (ci >= argc)
+			{
+				printf("error: missed value after -tames option\r\n");
+				return false;
+			}
 			strcpy(gTamesFileName, argv[ci]);
 			ci++;
 		}
 		else
-		if (strcmp(argument, "-max") == 0)
+		if (strcmp(argument, "-m") == 0)
 		{
+			if (ci >= argc)
+			{
+				printf("error: missed value after -m option\r\n");
+				return false;
+			}
 			double val = atof(argv[ci]);
 			ci++;
 			if (val < 0.001)
 			{
-				printf("error: invalid value for -max option\r\n");
+				printf("error: invalid value for -m option\r\n");
 				return false;
 			}
 			gMax = val;
@@ -1042,7 +1140,7 @@ bool ParseCommandLine(int argc, char* argv[])
         if (!gPubKey.x.IsZero())
                 if (!gStartSet || !gEndSet || !gDP)
                 {
-                        printf("error: you must also specify -dp, -start and -end options\r\n");
+                        printf("error: you must also specify -d and a start/end range options\r\n");
                         return false;
                 }
         if (gStartSet && gEndSet)
@@ -1051,7 +1149,7 @@ bool ParseCommandLine(int argc, char* argv[])
                 bool carry = gRangeWidth.Sub(gStart);
                 if (carry || gRangeWidth.IsZero())
                 {
-                        printf("error: -end must be greater than -start\r\n");
+                        printf("error: end must be greater than start\r\n");
                         return false;
                 }
                 gRangeBits = GetBitLength(gRangeWidth);
@@ -1065,13 +1163,13 @@ bool ParseCommandLine(int argc, char* argv[])
         {
                 if (gMax == 0.0)
                 {
-                        printf("error: you must also specify -max option to generate tames\r\n");
+                        printf("error: you must also specify -m option to generate tames\r\n");
                         return false;
                 }
                 gGenMode = true;
                 if (!gStartSet || !gEndSet)
                 {
-                        printf("error: -start and -end options are required when generating tames\r\n");
+                        printf("error: start/end options are required when generating tames\r\n");
                         return false;
                 }
         }
