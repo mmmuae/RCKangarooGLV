@@ -148,24 +148,26 @@ static EcInt AbsDistance(const EcInt& a, const EcInt& b)
 // Modular shortest distance between two EcInt values within the configured range width
 static EcInt ModularShortestDistance(const EcInt& a, const EcInt& b)
 {
-        EcInt gap = AbsDistance(a, b);
         if (gRangeWidth.IsZero())
-                return gap;
+                return AbsDistance(a, b);
+
+        EcInt diff = a;
+        diff.Sub(b);
+        if (diff.data[4] >> 63)
+        {
+                EcInt width = gRangeWidth;
+                diff.Add(width);
+        }
 
         EcInt width = gRangeWidth;
+        if (!diff.IsLessThanU(width) && !diff.IsZero())
+                diff.Sub(width);
 
-        // Ensure gap is within [0, width) if input data already respects the range.
-        while (!gap.IsLessThanU(width) && !gap.IsZero())
-                gap.Sub(width);
-
-        if (gap.IsZero())
-                return gap;
-
-        EcInt alt = width;
-        alt.Sub(gap);
-        if (alt.IsLessThanU(gap))
+        EcInt alt = gRangeWidth;
+        alt.Sub(diff);
+        if (alt.IsLessThanU(diff))
                 return alt;
-        return gap;
+        return diff;
 }
 
 // Normalize a candidate key so it always falls inside the configured search range
@@ -1374,4 +1376,3 @@ label_end:
 	free(pPntList2);
 	free(pPntList);
 }
-
