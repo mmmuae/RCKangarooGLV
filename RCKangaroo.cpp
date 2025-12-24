@@ -11,6 +11,10 @@
 #include <set>
 #include <string>
 #include <algorithm>
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 
 #include "cuda_runtime.h"
 #include "cuda.h"
@@ -35,10 +39,20 @@ EcPoint Pnt_NegHalfRange;
 EcInt Int_TameOffset;
 Ec ec;
 
-CriticalSection csAddPoints;
-u8* pPntList;
-u8* pPntList2;
-volatile int PntIndex;
+struct DPQueue
+{
+	std::vector<u8> buffer;
+	size_t capacity;
+	size_t head;
+	size_t tail;
+	size_t count;
+	std::mutex mutex;
+	std::condition_variable not_empty;
+	std::condition_variable not_full;
+};
+
+DPQueue gDpQueue;
+std::atomic<bool> gStopPointProcessing;
 TFastBase db;
 EcPoint gPntToSolve;
 EcInt gPrivKey;
@@ -46,7 +60,7 @@ EcInt gPrivKey;
 volatile u64 TotalOps;
 u32 TotalSolved;
 u32 gTotalErrors;
-u64 PntTotalOps;
+std::atomic<u64> PntTotalOps;
 bool IsBench;
 
 // Statistics tracking
@@ -111,6 +125,27 @@ static int GetBitLength(const EcInt& val)
                 }
         }
         return 0;
+}
+
+static size_t CalcHostDpCapacity(u64 total_kangs, int dp_bits)
+{
+	double dp_val = (double)(1ull << dp_bits);
+	double expected = ((double)total_kangs * STEP_CNT) / dp_val;
+	double capacity = expected * 8.0 + 4096.0;
+	if (capacity < 16384.0)
+		capacity = 16384.0;
+	return (size_t)capacity;
+}
+
+static void InitDpQueue(size_t capacity)
+{
+	std::lock_guard<std::mutex> lock(gDpQueue.mutex);
+	gDpQueue.buffer.assign(capacity * GPU_DP_SIZE, 0);
+	gDpQueue.capacity = capacity;
+	gDpQueue.head = 0;
+	gDpQueue.tail = 0;
+	gDpQueue.count = 0;
+	gStopPointProcessing.store(false);
 }
 
 // Deserialize 22-byte DP distance into EcInt with sign extension if needed
@@ -475,19 +510,52 @@ void* kang_thr_proc(void* data)
 	return 0;
 }
 #endif
+static void GrowDpQueueLocked(size_t min_capacity)
+{
+	if (gDpQueue.capacity >= min_capacity)
+		return;
+	size_t new_capacity = gDpQueue.capacity ? gDpQueue.capacity : 1;
+	while (new_capacity < min_capacity)
+		new_capacity *= 2;
+	std::vector<u8> new_buffer(new_capacity * GPU_DP_SIZE);
+	if (gDpQueue.count)
+	{
+		size_t first = std::min(gDpQueue.count, gDpQueue.capacity - gDpQueue.head);
+		memcpy(new_buffer.data(), gDpQueue.buffer.data() + gDpQueue.head * GPU_DP_SIZE, first * GPU_DP_SIZE);
+		if (gDpQueue.count > first)
+		{
+			memcpy(new_buffer.data() + first * GPU_DP_SIZE, gDpQueue.buffer.data(), (gDpQueue.count - first) * GPU_DP_SIZE);
+		}
+	}
+	gDpQueue.buffer.swap(new_buffer);
+	gDpQueue.capacity = new_capacity;
+	gDpQueue.head = 0;
+	gDpQueue.tail = gDpQueue.count;
+}
+
 void AddPointsToList(u32* data, int pnt_cnt, u64 ops_cnt)
 {
-	csAddPoints.Enter();
-	if (PntIndex + pnt_cnt >= MAX_CNT_LIST)
-	{
-		csAddPoints.Leave();
-		printf("\n\rDPs buffer overflow, some points lost, increase DP value!\r\n");
+	if (pnt_cnt <= 0)
 		return;
+	std::unique_lock<std::mutex> lock(gDpQueue.mutex);
+	if ((size_t)pnt_cnt > gDpQueue.capacity)
+		GrowDpQueueLocked((size_t)pnt_cnt);
+	while (!gStopPointProcessing.load() && gDpQueue.count + (size_t)pnt_cnt > gDpQueue.capacity)
+		gDpQueue.not_full.wait(lock);
+	if (gStopPointProcessing.load())
+		return;
+
+	size_t first = std::min((size_t)pnt_cnt, gDpQueue.capacity - gDpQueue.tail);
+	memcpy(gDpQueue.buffer.data() + gDpQueue.tail * GPU_DP_SIZE, data, first * GPU_DP_SIZE);
+	if ((size_t)pnt_cnt > first)
+	{
+		memcpy(gDpQueue.buffer.data(), ((u8*)data) + first * GPU_DP_SIZE, ((size_t)pnt_cnt - first) * GPU_DP_SIZE);
 	}
-	memcpy(pPntList + GPU_DP_SIZE * PntIndex, data, pnt_cnt * GPU_DP_SIZE);
-	PntIndex += pnt_cnt;
-	PntTotalOps += ops_cnt;
-	csAddPoints.Leave();
+	gDpQueue.tail = (gDpQueue.tail + (size_t)pnt_cnt) % gDpQueue.capacity;
+	gDpQueue.count += (size_t)pnt_cnt;
+	PntTotalOps.fetch_add(ops_cnt, std::memory_order_relaxed);
+	lock.unlock();
+	gDpQueue.not_empty.notify_one();
 }
 
 bool Collision_SOTA(EcPoint& pnt, EcInt t, int TameType, EcInt w, int WildType, bool IsNeg)
@@ -530,27 +598,15 @@ bool Collision_SOTA(EcPoint& pnt, EcInt t, int TameType, EcInt w, int WildType, 
 }
 
 
-void CheckNewPoints()
+static void ProcessPoints(const u8* data, size_t cnt)
 {
-	csAddPoints.Enter();
-	if (!PntIndex)
+	for (size_t i = 0; i < cnt; i++)
 	{
-		csAddPoints.Leave();
-		return;
-	}
-
-	int cnt = PntIndex;
-	memcpy(pPntList2, pPntList, GPU_DP_SIZE * cnt);
-	PntIndex = 0;
-	csAddPoints.Leave();
-
-        for (int i = 0; i < cnt; i++)
-        {
-                DBRec nrec;
-                u8* p = pPntList2 + i * GPU_DP_SIZE;
-                memcpy(nrec.x, p, 12);
-                memcpy(nrec.d, p + 16, 22);
-                nrec.type = gGenMode ? TAME : p[40];
+		DBRec nrec;
+		const u8* p = data + i * GPU_DP_SIZE;
+		memcpy(nrec.x, p, 12);
+		memcpy(nrec.d, p + 16, 22);
+		nrec.type = gGenMode ? TAME : p[40];
 
                 EcInt fullDist = DeserializeDistance(nrec.d);
 
@@ -583,30 +639,30 @@ void CheckNewPoints()
                         }
                 }
 
-                if (!gGenMode)
-                {
-                        DistanceEntry entry{fullDist, nrec.type};
-                        if (nrec.type == TAME)
-                        {
-                                gTameDistances.insert(entry);
-                                ConsiderGapWithSet(entry, gWild1Distances);
-                                ConsiderGapWithSet(entry, gWild2Distances);
-                        }
-                        else if (nrec.type == WILD1)
-                        {
-                                gWild1Distances.insert(entry);
-                                ConsiderGapWithSet(entry, gTameDistances);
-                        }
-                        else
-                        {
-                                gWild2Distances.insert(entry);
-                                ConsiderGapWithSet(entry, gTameDistances);
-                        }
-                }
+		if (!gGenMode)
+		{
+			DistanceEntry entry{fullDist, nrec.type};
+			if (nrec.type == TAME)
+			{
+				gTameDistances.insert(entry);
+				ConsiderGapWithSet(entry, gWild1Distances);
+				ConsiderGapWithSet(entry, gWild2Distances);
+			}
+			else if (nrec.type == WILD1)
+			{
+				gWild1Distances.insert(entry);
+				ConsiderGapWithSet(entry, gTameDistances);
+			}
+			else
+			{
+				gWild2Distances.insert(entry);
+				ConsiderGapWithSet(entry, gTameDistances);
+			}
+		}
 
-                DBRec* pref = (DBRec*)db.FindOrAddDataBlock((u8*)&nrec);
-                if (gGenMode)
-                        continue;
+		DBRec* pref = (DBRec*)db.FindOrAddDataBlock((u8*)&nrec);
+		if (gGenMode)
+			continue;
 		if (pref)
 		{
 			//in db we dont store first 3 bytes so restore them
@@ -663,18 +719,45 @@ void CheckNewPoints()
 				continue;
 			}
 
-                        // Solution found! Use actual found key
-                        gEstimatedKey = gPrivKey;
-                        if (!gStart.IsZero())
-                        {
-                                EcInt ofs = gStart;
-                                gEstimatedKey.AddModP(ofs);
-                        }
-                        gHasEstimatedKey = true;
+			// Solution found! Use actual found key
+			gEstimatedKey = gPrivKey;
+			if (!gStart.IsZero())
+			{
+				EcInt ofs = gStart;
+				gEstimatedKey.AddModP(ofs);
+			}
+			gHasEstimatedKey = true;
 
 			gSolved = true;
 			break;
 		}
+	}
+}
+
+static void DpConsumerLoop()
+{
+	std::vector<u8> local;
+	while (true)
+	{
+		std::unique_lock<std::mutex> lock(gDpQueue.mutex);
+		gDpQueue.not_empty.wait(lock, [] { return gDpQueue.count > 0 || gStopPointProcessing.load(); });
+		if (gDpQueue.count == 0 && gStopPointProcessing.load())
+			break;
+		size_t cnt = gDpQueue.count;
+		local.resize(cnt * GPU_DP_SIZE);
+		size_t first = std::min(cnt, gDpQueue.capacity - gDpQueue.head);
+		memcpy(local.data(), gDpQueue.buffer.data() + gDpQueue.head * GPU_DP_SIZE, first * GPU_DP_SIZE);
+		if (cnt > first)
+		{
+			memcpy(local.data() + first * GPU_DP_SIZE, gDpQueue.buffer.data(), (cnt - first) * GPU_DP_SIZE);
+		}
+		gDpQueue.head = (gDpQueue.head + cnt) % gDpQueue.capacity;
+		gDpQueue.count = 0;
+		gDpQueue.tail = gDpQueue.head;
+		lock.unlock();
+		gDpQueue.not_full.notify_all();
+
+		ProcessPoints(local.data(), cnt);
 	}
 }
 
@@ -792,6 +875,7 @@ bool SolvePoint(EcPoint PntToSolve, EcInt& RangeWidth, int RangeBits, int DP, Ec
 	u64 total_kangs = GpuKangs[0]->CalcKangCnt();
 	for (int i = 1; i < GpuCnt; i++)
 		total_kangs += GpuKangs[i]->CalcKangCnt();
+	InitDpQueue(CalcHostDpCapacity(total_kangs, DP));
 
 	u64 dp_mask = ~((1ull << (64 - DP)) - 1);
 	printf("Number of CPU thread: 0\r\n");
@@ -827,8 +911,7 @@ bool SolvePoint(EcPoint PntToSolve, EcInt& RangeWidth, int RangeBits, int DP, Ec
         }
 
 	SetRndSeed(0); //use same seed to make tames from file compatible
-	PntTotalOps = 0;
-	PntIndex = 0;
+	PntTotalOps.store(0);
 
 	// Initialize statistics
         gTameCount = 0;
@@ -909,6 +992,7 @@ bool SolvePoint(EcPoint PntToSolve, EcInt& RangeWidth, int RangeBits, int DP, Ec
 #else
 	pthread_t thr_handles[MAX_GPU_CNT];
 #endif
+	std::thread dp_consumer(DpConsumerLoop);
 
 	u32 ThreadID;
 	gSolved = false;
@@ -925,15 +1009,14 @@ bool SolvePoint(EcPoint PntToSolve, EcInt& RangeWidth, int RangeBits, int DP, Ec
 	u64 tm_stats = GetTickCount64();
 	while (!gSolved)
 	{
-		CheckNewPoints();
 		Sleep(10);
 		if (GetTickCount64() - tm_stats > 10 * 1000)
 		{
-			ShowStats(tm0, ops, dp_val, PntTotalOps);
+			ShowStats(tm0, ops, dp_val, PntTotalOps.load());
 			tm_stats = GetTickCount64();
 		}
 
-		if ((MaxTotalOps > 0.0) && (PntTotalOps > MaxTotalOps))
+		if ((MaxTotalOps > 0.0) && (PntTotalOps.load() > MaxTotalOps))
 		{
 			gIsOpsLimit = true;
 			printf("\n\rOperations limit reached\r\n");
@@ -955,6 +1038,11 @@ bool SolvePoint(EcPoint PntToSolve, EcInt& RangeWidth, int RangeBits, int DP, Ec
 		pthread_join(thr_handles[i], NULL);
 #endif
 	}
+	gStopPointProcessing.store(true);
+	gDpQueue.not_empty.notify_all();
+	gDpQueue.not_full.notify_all();
+	if (dp_consumer.joinable())
+		dp_consumer.join();
 
 	if (gIsOpsLimit)
 	{
@@ -974,7 +1062,7 @@ bool SolvePoint(EcPoint PntToSolve, EcInt& RangeWidth, int RangeBits, int DP, Ec
 		return false;
 	}
 
-        double K = (double)PntTotalOps / pow(2.0, RangeBits / 2.0);
+        double K = (double)PntTotalOps.load() / pow(2.0, RangeBits / 2.0);
 	printf("\n\rPoint solved, K: %.3f (with DP and GPU overheads)\r\n\r\n", K);
 	db.Clear();
 	*pk_res = gPrivKey;
@@ -1261,8 +1349,6 @@ int main(int argc, char* argv[])
 		return 0;
 	}
 
-	pPntList = (u8*)malloc(MAX_CNT_LIST * GPU_DP_SIZE);
-	pPntList2 = (u8*)malloc(MAX_CNT_LIST * GPU_DP_SIZE);
 	TotalOps = 0;
 	TotalSolved = 0;
 	gTotalErrors = 0;
@@ -1360,7 +1446,7 @@ int main(int argc, char* argv[])
 				printf("FATAL ERROR: Found key is wrong!\r\n");
 				break;
                         }
-                        TotalOps += PntTotalOps;
+                        TotalOps += PntTotalOps.load();
                         TotalSolved++;
                         u64 ops_per_pnt = TotalOps / TotalSolved;
                         double K = (double)ops_per_pnt / pow(2.0, gRangeBits / 2.0);
@@ -1372,6 +1458,5 @@ label_end:
 	for (int i = 0; i < GpuCnt; i++)
 		delete GpuKangs[i];
 	DeInitEc();
-	free(pPntList2);
-	free(pPntList);
+	return 0;
 }

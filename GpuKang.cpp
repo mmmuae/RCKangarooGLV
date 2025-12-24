@@ -5,6 +5,7 @@
 
 
 #include <iostream>
+#include <limits>
 #include "cuda_runtime.h"
 #include "cuda.h"
 
@@ -15,6 +16,18 @@ void CallGpuKernelGen(TKparams Kparams);
 void CallGpuKernelABC(TKparams Kparams);
 void AddPointsToList(u32* data, int cnt, u64 ops_cnt);
 extern bool gGenMode; //tames generation mode
+
+static u32 CalcDpCapacity(u64 kang_cnt, int dp_bits)
+{
+	double dp_val = (double)(1ull << dp_bits);
+	double expected = ((double)kang_cnt * STEP_CNT) / dp_val;
+	double capacity = expected * 4.0 + 1024.0;
+	if (capacity < 4096.0)
+		capacity = 4096.0;
+	if (capacity > (double)std::numeric_limits<u32>::max())
+		return std::numeric_limits<u32>::max();
+	return (u32)capacity;
+}
 
 int RCGpuKang::CalcKangCnt()
 {
@@ -52,6 +65,7 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _RangeBits, int _DP, EcInt _Ran
 	KangCnt = Kparams.BlockSize * Kparams.GroupCnt * Kparams.BlockCnt;
 	Kparams.KangCnt = KangCnt;
 	Kparams.DP = DP;
+	Kparams.DPsCapacity = CalcDpCapacity(KangCnt, DP);
 	Kparams.KernelA_LDS_Size = 64 * JMP_CNT + 16 * Kparams.BlockSize;
 	Kparams.KernelB_LDS_Size = 64 * JMP_CNT;
 	Kparams.KernelC_LDS_Size = 96 * JMP_CNT;
@@ -88,7 +102,7 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _RangeBits, int _DP, EcInt _Ran
 			return false;
 		}
 	}
-	size = MAX_DP_CNT * GPU_DP_SIZE + 16;
+	size = (u64)Kparams.DPsCapacity * GPU_DP_SIZE + 16;
 	total_mem += size;
 	err = cudaMalloc((void**)&Kparams.DPs_out, size);
 	if (err != cudaSuccess)
@@ -192,7 +206,7 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _RangeBits, int _DP, EcInt _Ran
 		return false;
 	}
 
-	DPs_out = (u32*)malloc(MAX_DP_CNT * GPU_DP_SIZE);
+	DPs_out = (u32*)malloc((u64)Kparams.DPsCapacity * GPU_DP_SIZE);
 
 //jmp1
 	u64* buf = (u64*)malloc(JMP_CNT * 96);
@@ -462,9 +476,9 @@ void RCGpuKang::Execute()
 			break;
 		}
 		
-		if (cnt >= MAX_DP_CNT)
+		if ((u32)cnt >= Kparams.DPsCapacity)
 		{
-			cnt = MAX_DP_CNT;
+			cnt = (int)Kparams.DPsCapacity;
 			printf("GPU %d, gpu DP buffer overflow, some points lost, increase DP value!\r\n", CudaIndex);
 		}
 		u64 pnt_cnt = (u64)KangCnt * STEP_CNT;
