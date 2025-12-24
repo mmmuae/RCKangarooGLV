@@ -145,23 +145,6 @@ static EcInt AbsDistance(const EcInt& a, const EcInt& b)
         return gap;
 }
 
-// Modular shortest distance over configured range width
-static EcInt ModularDistance(const EcInt& a, const EcInt& b)
-{
-        EcInt gap = AbsDistance(a, b);
-        if (gRangeWidth.IsZero())
-                return gap;
-
-        if (Int_HalfRange.IsLessThanU(gap))
-        {
-                EcInt alt = gRangeWidth;
-                alt.Sub(gap);
-                gap = alt;
-        }
-
-        return gap;
-}
-
 // Normalize a candidate key so it always falls inside the configured search range
 static EcInt NormalizeKeyToRange(const EcInt& cand)
 {
@@ -179,8 +162,8 @@ static EcInt NormalizeKeyToRange(const EcInt& cand)
                         normalized.Add(gRangeWidth);
         }
 
-        // Bring value into [0, gRangeWidth) with a single wrap
-        if (!normalized.IsLessThanU(gRangeWidth))
+        // Bring value into [0, gRangeWidth)
+        while (!normalized.IsLessThanU(gRangeWidth))
                 normalized.Sub(gRangeWidth);
 
         // Convert back to absolute coordinate
@@ -264,20 +247,19 @@ static EcInt EstimateKeyFromPair(const DistanceEntry& a, const DistanceEntry& b)
         bool hasBest = false;
 
         auto ConsiderCandidate = [&](const EcInt& candidate) {
-                EcInt withOffset = ApplyStartOffset(candidate);
-                EcInt normalized = NormalizeKeyToRange(withOffset);
-                EcInt scalar = normalized;
+                EcInt scalar = candidate;
                 EcPoint P = ec.MultiplyG(scalar);
                 if (P.IsEqual(gPntToSolve))
                 {
-                        bestKey = normalized;
+                        bestKey = ApplyStartOffset(candidate);
                         return true;
                 }
 
-                EcInt dist = ModularDistance(normalized, gStart);
+                EcInt withOffset = ApplyStartOffset(candidate);
+                EcInt dist = AbsDistance(withOffset, gStart);
                 if (!hasBest || dist.IsLessThanU(bestDist))
                 {
-                        bestKey = normalized;
+                        bestKey = withOffset;
                         bestDist = dist;
                         hasBest = true;
                 }
@@ -357,9 +339,7 @@ static EcInt EstimateKeyFromPair(const DistanceEntry& a, const DistanceEntry& b)
 
 static void UpdateGlobalGap(const DistanceEntry& distA, const DistanceEntry& distB)
 {
-        if (distA.type == distB.type)
-                return;
-        EcInt gap = ModularDistance(distA.dist, distB.dist);
+        EcInt gap = AbsDistance(distA.dist, distB.dist);
         if (!gHasLowestGap || gap.IsLessThanU(gLowestGap))
         {
                 gLowestGap = gap;
@@ -590,11 +570,13 @@ void CheckNewPoints()
                         {
                                 gWild1Distances.insert(entry);
                                 ConsiderGapWithSet(entry, gTameDistances);
+                                ConsiderGapWithSet(entry, gWild2Distances);
                         }
                         else
                         {
                                 gWild2Distances.insert(entry);
                                 ConsiderGapWithSet(entry, gTameDistances);
+                                ConsiderGapWithSet(entry, gWild1Distances);
                         }
                 }
 
@@ -664,7 +646,6 @@ void CheckNewPoints()
                                 EcInt ofs = gStart;
                                 gEstimatedKey.AddModP(ofs);
                         }
-                        gEstimatedKey = NormalizeKeyToRange(gEstimatedKey);
                         gHasEstimatedKey = true;
 
 			gSolved = true;
