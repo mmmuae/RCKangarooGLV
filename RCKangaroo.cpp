@@ -48,7 +48,6 @@ struct DPQueue
 	size_t count;
 	std::mutex mutex;
 	std::condition_variable not_empty;
-	std::condition_variable not_full;
 };
 
 DPQueue gDpQueue;
@@ -132,8 +131,8 @@ static size_t CalcHostDpCapacity(u64 total_kangs, int dp_bits)
 	double dp_val = (double)(1ull << dp_bits);
 	double expected = ((double)total_kangs * STEP_CNT) / dp_val;
 	double capacity = expected * 8.0 + 4096.0;
-	if (capacity < 16384.0)
-		capacity = 16384.0;
+	if (capacity < (double)MAX_CNT_LIST)
+		capacity = (double)MAX_CNT_LIST;
 	return (size_t)capacity;
 }
 
@@ -538,12 +537,11 @@ void AddPointsToList(u32* data, int pnt_cnt, u64 ops_cnt)
 	if (pnt_cnt <= 0)
 		return;
 	std::unique_lock<std::mutex> lock(gDpQueue.mutex);
-	if ((size_t)pnt_cnt > gDpQueue.capacity)
-		GrowDpQueueLocked((size_t)pnt_cnt);
-	while (!gStopPointProcessing.load() && gDpQueue.count + (size_t)pnt_cnt > gDpQueue.capacity)
-		gDpQueue.not_full.wait(lock);
 	if (gStopPointProcessing.load())
 		return;
+	size_t needed = gDpQueue.count + (size_t)pnt_cnt;
+	if (needed > gDpQueue.capacity)
+		GrowDpQueueLocked(needed);
 
 	size_t first = std::min((size_t)pnt_cnt, gDpQueue.capacity - gDpQueue.tail);
 	memcpy(gDpQueue.buffer.data() + gDpQueue.tail * GPU_DP_SIZE, data, first * GPU_DP_SIZE);
@@ -755,7 +753,6 @@ static void DpConsumerLoop()
 		gDpQueue.count = 0;
 		gDpQueue.tail = gDpQueue.head;
 		lock.unlock();
-		gDpQueue.not_full.notify_all();
 
 		ProcessPoints(local.data(), cnt);
 	}
@@ -1040,7 +1037,6 @@ bool SolvePoint(EcPoint PntToSolve, EcInt& RangeWidth, int RangeBits, int DP, Ec
 	}
 	gStopPointProcessing.store(true);
 	gDpQueue.not_empty.notify_all();
-	gDpQueue.not_full.notify_all();
 	if (dp_consumer.joinable())
 		dp_consumer.join();
 

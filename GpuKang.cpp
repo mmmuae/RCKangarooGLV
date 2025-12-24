@@ -22,8 +22,8 @@ static u32 CalcDpCapacity(u64 kang_cnt, int dp_bits)
 	double dp_val = (double)(1ull << dp_bits);
 	double expected = ((double)kang_cnt * STEP_CNT) / dp_val;
 	double capacity = expected * 4.0 + 1024.0;
-	if (capacity < 4096.0)
-		capacity = 4096.0;
+	if (capacity < (double)MAX_DP_CNT)
+		capacity = (double)MAX_DP_CNT;
 	if (capacity > (double)std::numeric_limits<u32>::max())
 		return std::numeric_limits<u32>::max();
 	return (u32)capacity;
