@@ -145,32 +145,6 @@ static EcInt AbsDistance(const EcInt& a, const EcInt& b)
         return gap;
 }
 
-// Modular shortest distance between two EcInt values within the configured range width
-static EcInt ModularShortestDistance(const EcInt& a, const EcInt& b)
-{
-        if (gRangeWidth.IsZero())
-                return AbsDistance(a, b);
-
-        EcInt diff = a;
-        EcInt rhs = b;
-        diff.Sub(rhs);
-        if (diff.data[4] >> 63)
-        {
-                EcInt width = gRangeWidth;
-                diff.Add(width);
-        }
-
-        EcInt width = gRangeWidth;
-        if (!diff.IsLessThanU(width) && !diff.IsZero())
-                diff.Sub(width);
-
-        EcInt alt = gRangeWidth;
-        alt.Sub(diff);
-        if (alt.IsLessThanU(diff))
-                return alt;
-        return diff;
-}
-
 // Normalize a candidate key so it always falls inside the configured search range
 static EcInt NormalizeKeyToRange(const EcInt& cand)
 {
@@ -277,11 +251,11 @@ static EcInt EstimateKeyFromPair(const DistanceEntry& a, const DistanceEntry& b)
                 EcPoint P = ec.MultiplyG(scalar);
                 if (P.IsEqual(gPntToSolve))
                 {
-                        bestKey = NormalizeKeyToRange(ApplyStartOffset(candidate));
+                        bestKey = ApplyStartOffset(candidate);
                         return true;
                 }
 
-                EcInt withOffset = NormalizeKeyToRange(ApplyStartOffset(candidate));
+                EcInt withOffset = ApplyStartOffset(candidate);
                 EcInt dist = AbsDistance(withOffset, gStart);
                 if (!hasBest || dist.IsLessThanU(bestDist))
                 {
@@ -365,7 +339,7 @@ static EcInt EstimateKeyFromPair(const DistanceEntry& a, const DistanceEntry& b)
 
 static void UpdateGlobalGap(const DistanceEntry& distA, const DistanceEntry& distB)
 {
-        EcInt gap = ModularShortestDistance(distA.dist, distB.dist);
+        EcInt gap = AbsDistance(distA.dist, distB.dist);
         if (!gHasLowestGap || gap.IsLessThanU(gLowestGap))
         {
                 gLowestGap = gap;
@@ -596,11 +570,13 @@ void CheckNewPoints()
                         {
                                 gWild1Distances.insert(entry);
                                 ConsiderGapWithSet(entry, gTameDistances);
+                                ConsiderGapWithSet(entry, gWild2Distances);
                         }
                         else
                         {
                                 gWild2Distances.insert(entry);
                                 ConsiderGapWithSet(entry, gTameDistances);
+                                ConsiderGapWithSet(entry, gWild1Distances);
                         }
                 }
 
@@ -1375,3 +1351,5 @@ label_end:
 	free(pPntList2);
 	free(pPntList);
 }
+
+
