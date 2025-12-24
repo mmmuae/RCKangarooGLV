@@ -277,11 +277,11 @@ static EcInt EstimateKeyFromPair(const DistanceEntry& a, const DistanceEntry& b)
                 EcPoint P = ec.MultiplyG(scalar);
                 if (P.IsEqual(gPntToSolve))
                 {
-                        bestKey = ApplyStartOffset(candidate);
+                        bestKey = NormalizeKeyToRange(ApplyStartOffset(candidate));
                         return true;
                 }
 
-                EcInt withOffset = ApplyStartOffset(candidate);
+                EcInt withOffset = NormalizeKeyToRange(ApplyStartOffset(candidate));
                 EcInt dist = AbsDistance(withOffset, gStart);
                 if (!hasBest || dist.IsLessThanU(bestDist))
                 {
