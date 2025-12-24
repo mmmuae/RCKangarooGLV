@@ -563,15 +563,23 @@ void* kang_thr_proc(void* data)
 void AddPointsToList(u32* data, int pnt_cnt, u64 ops_cnt)
 {
 	csAddPoints.Enter();
-	if (PntIndex + pnt_cnt >= MAX_CNT_LIST)
+	int available = MAX_CNT_LIST - PntIndex;
+	int to_copy = pnt_cnt;
+	if (available <= 0)
 	{
 		csAddPoints.Leave();
 		printf("\n\rDPs buffer overflow, some points lost, increase DP value!\r\n");
 		return;
 	}
-	memcpy(pPntList + GPU_DP_SIZE * PntIndex, data, pnt_cnt * GPU_DP_SIZE);
-	PntIndex += pnt_cnt;
-	PntTotalOps += ops_cnt;
+	if (pnt_cnt > available)
+	{
+		to_copy = available;
+		printf("\n\rDPs buffer overflow, some points lost, increase DP value!\r\n");
+	}
+	memcpy(pPntList + GPU_DP_SIZE * PntIndex, data, to_copy * GPU_DP_SIZE);
+	PntIndex += to_copy;
+	if (pnt_cnt > 0)
+		PntTotalOps += (ops_cnt * (u64)to_copy) / (u64)pnt_cnt;
 	csAddPoints.Leave();
 }
 
@@ -625,7 +633,7 @@ void CheckNewPoints()
 	}
 
 	int cnt = PntIndex;
-	memcpy(pPntList2, pPntList, GPU_DP_SIZE * cnt);
+	std::swap(pPntList, pPntList2);
 	PntIndex = 0;
 	csAddPoints.Leave();
 
