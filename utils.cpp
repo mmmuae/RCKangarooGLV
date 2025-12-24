@@ -56,7 +56,7 @@ u64 GetTickCount64()
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-#define DB_REC_LEN			(9 + DP_DISTANCE_BYTES + 1)
+#define DB_REC_LEN			32
 #define DB_FIND_LEN			9
 #define DB_MIN_GROW_CNT		2
 
@@ -317,9 +317,9 @@ int TFastBase::GetBucketData(int i, int j, int k, u8* distances, u8* types, int 
 	for (int m = 0; m < count; m++)
 	{
 		void* ptr = mps[i].GetRecPtr(list->data[m]);
-		// Copy distance and type (skip 9 bytes of X after the bucket bytes)
-		memcpy(distances + m * DP_DISTANCE_BYTES, (u8*)ptr + 9, DP_DISTANCE_BYTES);
-		memcpy(types + m, (u8*)ptr + 9 + DP_DISTANCE_BYTES, 1);
+		// Copy distance (22 bytes) and type (1 byte at offset 22)
+		memcpy(distances + m * 22, ptr, 22);
+		memcpy(types + m, (u8*)ptr + 22, 1);
 	}
 	return count;
 }
