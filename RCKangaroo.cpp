@@ -190,25 +190,6 @@ static EcInt NormalizeKeyToRange(const EcInt& cand)
         return normalized;
 }
 
-// Normalize a candidate key into [0, gRangeWidth) for collision checks
-static EcInt NormalizeKeyToWidth(const EcInt& cand)
-{
-        if (gRangeWidth.IsZero())
-                return cand;
-
-        EcInt normalized = cand;
-
-        // If negative, wrap once into the positive range
-        if (normalized.data[4] >> 63)
-                normalized.Add(gRangeWidth);
-
-        // Reduce if still above range
-        if (!normalized.IsLessThanU(gRangeWidth))
-                normalized.Sub(gRangeWidth);
-
-        return normalized;
-}
-
 // Convert EcInt to billions using all limbs
 static double EcIntToBillions(const EcInt& val)
 {
@@ -513,14 +494,12 @@ bool Collision_SOTA(EcPoint& pnt, EcInt t, int TameType, EcInt w, int WildType, 
 		gPrivKey.Sub(w);
 		EcInt sv = gPrivKey;
 		gPrivKey.Add(Int_HalfRange);
-                gPrivKey = NormalizeKeyToWidth(gPrivKey);
 		EcPoint P = ec.MultiplyG(gPrivKey);
 		if (P.IsEqual(pnt))
 			return true;
 		gPrivKey = sv;
 		gPrivKey.Neg();
 		gPrivKey.Add(Int_HalfRange);
-                gPrivKey = NormalizeKeyToWidth(gPrivKey);
 		P = ec.MultiplyG(gPrivKey);
 		return P.IsEqual(pnt);
 	}
@@ -533,14 +512,12 @@ bool Collision_SOTA(EcPoint& pnt, EcInt t, int TameType, EcInt w, int WildType, 
 		gPrivKey.ShiftRight(1);
 		EcInt sv = gPrivKey;
 		gPrivKey.Add(Int_HalfRange);
-                gPrivKey = NormalizeKeyToWidth(gPrivKey);
 		EcPoint P = ec.MultiplyG(gPrivKey);
 		if (P.IsEqual(pnt))
 			return true;
 		gPrivKey = sv;
 		gPrivKey.Neg();
 		gPrivKey.Add(Int_HalfRange);
-                gPrivKey = NormalizeKeyToWidth(gPrivKey);
 		P = ec.MultiplyG(gPrivKey);
 		return P.IsEqual(pnt);
 	}
