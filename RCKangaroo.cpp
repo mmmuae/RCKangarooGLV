@@ -11,10 +11,6 @@
 #include <set>
 #include <string>
 #include <algorithm>
-#include <atomic>
-#include <thread>
-#include <deque>
-#include <mutex>
 
 #include "cuda_runtime.h"
 #include "cuda.h"
@@ -99,27 +95,9 @@ struct DistanceEntryLess
 std::multiset<DistanceEntry, DistanceEntryLess> gTameDistances;
 std::multiset<DistanceEntry, DistanceEntryLess> gWild1Distances;
 std::multiset<DistanceEntry, DistanceEntryLess> gWild2Distances;
-std::deque<std::multiset<DistanceEntry, DistanceEntryLess>::iterator> gTameDistanceOrder;
-std::deque<std::multiset<DistanceEntry, DistanceEntryLess>::iterator> gWild1DistanceOrder;
-std::deque<std::multiset<DistanceEntry, DistanceEntryLess>::iterator> gWild2DistanceOrder;
 DistanceEntry gBestDistanceA;
 DistanceEntry gBestDistanceB;
 bool gHasGapPair;
-std::mutex gStatsMutex;
-
-struct StatPacket
-{
-        EcInt dist;
-        int type;
-};
-
-static constexpr size_t STAT_QUEUE_SIZE = 16384;
-static constexpr size_t STAT_QUEUE_MASK = STAT_QUEUE_SIZE - 1;
-static constexpr size_t MAX_DISTANCE_ENTRIES = 500000;
-StatPacket g_StatQueue[STAT_QUEUE_SIZE];
-std::atomic<size_t> g_StatHead(0);
-std::atomic<size_t> g_StatTail(0);
-std::atomic<bool> g_StatsRunning(false);
 
 static int GetBitLength(const EcInt& val)
 {
@@ -388,7 +366,6 @@ static EcInt EstimateKeyFromPair(const DistanceEntry& a, const DistanceEntry& b)
 static void UpdateGlobalGap(const DistanceEntry& distA, const DistanceEntry& distB)
 {
         EcInt gap = ModularShortestDistance(distA.dist, distB.dist);
-        std::lock_guard<std::mutex> lock(gStatsMutex);
         if (!gHasLowestGap || gap.IsLessThanU(gLowestGap))
         {
                 gLowestGap = gap;
@@ -398,11 +375,8 @@ static void UpdateGlobalGap(const DistanceEntry& distA, const DistanceEntry& dis
                 gBestDistanceB = distB;
                 gHasGapPair = true;
 
-                if (!gSolved)
-                {
-                        gEstimatedKey = EstimateKeyFromPair(distA, distB);
-                        gHasEstimatedKey = true;
-                }
+                gEstimatedKey = EstimateKeyFromPair(distA, distB);
+                gHasEstimatedKey = true;
         }
 }
 
@@ -419,65 +393,6 @@ static void ConsiderGapWithSet(const DistanceEntry& entry, const std::multiset<D
         {
                 --it;
                 UpdateGlobalGap(entry, *it);
-        }
-}
-
-static void InsertDistanceBounded(std::multiset<DistanceEntry, DistanceEntryLess>& herd,
-                                  std::deque<std::multiset<DistanceEntry, DistanceEntryLess>::iterator>& order,
-                                  const DistanceEntry& entry)
-{
-        auto it = herd.insert(entry);
-        order.push_back(it);
-        if (order.size() > MAX_DISTANCE_ENTRIES)
-        {
-                herd.erase(order.front());
-                order.pop_front();
-        }
-}
-
-static bool TryPushStat(const EcInt& d, int t)
-{
-        size_t head = g_StatHead.load(std::memory_order_relaxed);
-        size_t nextHead = (head + 1) & STAT_QUEUE_MASK;
-        if (nextHead == g_StatTail.load(std::memory_order_acquire))
-                return false;
-        g_StatQueue[head] = {d, t};
-        g_StatHead.store(nextHead, std::memory_order_release);
-        return true;
-}
-
-static void StatsWorkerThread()
-{
-        while (g_StatsRunning.load(std::memory_order_acquire) ||
-               g_StatTail.load(std::memory_order_relaxed) != g_StatHead.load(std::memory_order_acquire))
-        {
-                size_t tail = g_StatTail.load(std::memory_order_relaxed);
-                if (tail == g_StatHead.load(std::memory_order_acquire))
-                {
-                        Sleep(1);
-                        continue;
-                }
-
-                StatPacket pkt = g_StatQueue[tail];
-                g_StatTail.store((tail + 1) & STAT_QUEUE_MASK, std::memory_order_release);
-
-                DistanceEntry entry{pkt.dist, pkt.type};
-                if (pkt.type == TAME)
-                {
-                        InsertDistanceBounded(gTameDistances, gTameDistanceOrder, entry);
-                        ConsiderGapWithSet(entry, gWild1Distances);
-                        ConsiderGapWithSet(entry, gWild2Distances);
-                }
-                else if (pkt.type == WILD1)
-                {
-                        InsertDistanceBounded(gWild1Distances, gWild1DistanceOrder, entry);
-                        ConsiderGapWithSet(entry, gTameDistances);
-                }
-                else
-                {
-                        InsertDistanceBounded(gWild2Distances, gWild2DistanceOrder, entry);
-                        ConsiderGapWithSet(entry, gTameDistances);
-                }
         }
 }
 
@@ -668,8 +583,26 @@ void CheckNewPoints()
                         }
                 }
 
-                if (!gGenMode && g_StatsRunning.load(std::memory_order_relaxed))
-                        TryPushStat(fullDist, nrec.type);
+                if (!gGenMode)
+                {
+                        DistanceEntry entry{fullDist, nrec.type};
+                        if (nrec.type == TAME)
+                        {
+                                gTameDistances.insert(entry);
+                                ConsiderGapWithSet(entry, gWild1Distances);
+                                ConsiderGapWithSet(entry, gWild2Distances);
+                        }
+                        else if (nrec.type == WILD1)
+                        {
+                                gWild1Distances.insert(entry);
+                                ConsiderGapWithSet(entry, gTameDistances);
+                        }
+                        else
+                        {
+                                gWild2Distances.insert(entry);
+                                ConsiderGapWithSet(entry, gTameDistances);
+                        }
+                }
 
                 DBRec* pref = (DBRec*)db.FindOrAddDataBlock((u8*)&nrec);
                 if (gGenMode)
@@ -731,16 +664,13 @@ void CheckNewPoints()
 			}
 
                         // Solution found! Use actual found key
+                        gEstimatedKey = gPrivKey;
+                        if (!gStart.IsZero())
                         {
-                                std::lock_guard<std::mutex> lock(gStatsMutex);
-                                gEstimatedKey = gPrivKey;
-                                if (!gStart.IsZero())
-                                {
-                                        EcInt ofs = gStart;
-                                        gEstimatedKey.AddModP(ofs);
-                                }
-                                gHasEstimatedKey = true;
+                                EcInt ofs = gStart;
+                                gEstimatedKey.AddModP(ofs);
                         }
+                        gHasEstimatedKey = true;
 
 			gSolved = true;
 			break;
@@ -784,23 +714,11 @@ void ShowStats(u64 tm_start, double exp_ops, double dp_val, u64 total_ops)
 	u64 wildTotal = gWild1Count + gWild2Count;
 	double twRatio = (wildTotal > 0) ? ((double)gTameCount / (double)wildTotal) : 0.0;
 
-        EcInt lowestGapSnapshot;
-        EcInt estimatedKeySnapshot;
-        bool hasLowestGapSnapshot = false;
-        bool hasEstimatedKeySnapshot = false;
-        {
-                std::lock_guard<std::mutex> lock(gStatsMutex);
-                lowestGapSnapshot = gLowestGap;
-                estimatedKeySnapshot = gEstimatedKey;
-                hasLowestGapSnapshot = gHasLowestGap;
-                hasEstimatedKeySnapshot = gHasEstimatedKey;
-        }
-
         // Format lowest gap using full precision converted to billions
         char gapStr[100];
-        if (hasLowestGapSnapshot)
+        if (gHasLowestGap)
         {
-                double gapDisplay = EcIntToBillions(lowestGapSnapshot);
+                double gapDisplay = EcIntToBillions(gLowestGap);
                 snprintf(gapStr, sizeof(gapStr), "%.1f", gapDisplay);
         }
         else
@@ -810,9 +728,9 @@ void ShowStats(u64 tm_start, double exp_ops, double dp_val, u64 total_ops)
 
         // Format estimated key (full decimal, no trimming)
         char keyStr[200];
-        if (hasEstimatedKeySnapshot)
+        if (gHasEstimatedKey)
         {
-                std::string decimal = EcIntToDecimal(estimatedKeySnapshot);
+                std::string decimal = EcIntToDecimal(gEstimatedKey);
                 strncpy(keyStr, decimal.c_str(), sizeof(keyStr) - 1);
                 keyStr[sizeof(keyStr) - 1] = 0;
         }
@@ -924,33 +842,10 @@ bool SolvePoint(EcPoint PntToSolve, EcInt& RangeWidth, int RangeBits, int DP, Ec
         gTameDistances.clear();
         gWild1Distances.clear();
         gWild2Distances.clear();
-        gTameDistanceOrder.clear();
-        gWild1DistanceOrder.clear();
-        gWild2DistanceOrder.clear();
         gBestDistanceA.dist.SetZero();
         gBestDistanceA.type = 0;
         gBestDistanceB.dist.SetZero();
         gBestDistanceB.type = 0;
-        g_StatHead.store(0, std::memory_order_relaxed);
-        g_StatTail.store(0, std::memory_order_relaxed);
-
-        std::thread statsThread;
-        bool statsThreadStarted = false;
-        auto stopStatsThread = [&]() {
-                if (statsThreadStarted)
-                {
-                        g_StatsRunning.store(false, std::memory_order_release);
-                        statsThread.join();
-                        statsThreadStarted = false;
-                }
-        };
-
-        if (!gGenMode)
-        {
-                g_StatsRunning.store(true, std::memory_order_release);
-                statsThread = std::thread(StatsWorkerThread);
-                statsThreadStarted = true;
-        }
 //prepare jumps
         EcInt minjump, t;
         minjump.Set(1);
@@ -1076,7 +971,6 @@ bool SolvePoint(EcPoint PntToSolve, EcInt& RangeWidth, int RangeBits, int DP, Ec
                                 printf("tames saving failed\r\n");
                 }
 		db.Clear();
-                stopStatsThread();
 		return false;
 	}
 
@@ -1084,7 +978,6 @@ bool SolvePoint(EcPoint PntToSolve, EcInt& RangeWidth, int RangeBits, int DP, Ec
 	printf("\n\rPoint solved, K: %.3f (with DP and GPU overheads)\r\n\r\n", K);
 	db.Clear();
 	*pk_res = gPrivKey;
-        stopStatsThread();
 	return true;
 }
 
