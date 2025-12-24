@@ -490,7 +490,7 @@ __device__ __forceinline__ void BuildDP(const TKparams& Kparams, int kang_ind, u
 		return;
 	int4 rx = *(int4*)(Kparams.DPTable + Kparams.KangCnt + (kang_ind * DPTABLE_MAX_CNT + ind) * 4);
 	u32 pos = atomicAdd(Kparams.DPs_out, 1);
-	pos = min(pos, Kparams.DPsCapacity - 1);
+	pos = min(pos, MAX_DP_CNT - 1);
 	u32* DPs = Kparams.DPs_out + 4 + pos * GPU_DP_SIZE / 4;
 	*(int4*)&DPs[0] = rx;
 	*(int4*)&DPs[4] = ((int4*)d)[0];
