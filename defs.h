@@ -57,6 +57,7 @@ typedef char i8;
 #define WILD2				2  // Wild kangs2
 
 #define GPU_DP_SIZE			48
+#define DP_DISTANCE_BYTES		24
 #define MAX_DP_CNT			(256 * 1024)
 
 #define JMP_MASK			(JMP_CNT-1)
