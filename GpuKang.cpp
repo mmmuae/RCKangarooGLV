@@ -288,12 +288,14 @@ void RCGpuKang::GenerateRndDistances()
                 EcInt d;
                 if (i < KangCnt / 3)
                 {
-                        d.RndBits(RangeBits - 4); //TAME kangs
+                        EcInt tameRange = RangeWidth;
+                        tameRange.ShiftRight(4); // keep tame herd narrower around half-range
+                        d.RndMax(tameRange); // TAME kangs within range width
                         d.Add(TameOffset); //center tame herd around half-range
                 }
                 else
                 {
-                        d.RndBits(RangeBits - 1);
+                        d.RndMax(RangeWidth);
                         d.data[0] &= 0xFFFFFFFFFFFFFFFE; //must be even
                 }
                 memcpy(RndPnts[i].priv, d.data, 24);
