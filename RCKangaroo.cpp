@@ -113,16 +113,16 @@ static int GetBitLength(const EcInt& val)
         return 0;
 }
 
-// Deserialize 24-byte DP distance into EcInt with sign extension if needed
+// Deserialize 22-byte DP distance into EcInt with sign extension if needed
 static EcInt DeserializeDistance(const u8* dist)
 {
         EcInt res;
-        memcpy(res.data, dist, DP_DISTANCE_BYTES);
+        memcpy(res.data, dist, 22);
         // Sign-extend if negative marker is present
-        if (dist[DP_DISTANCE_BYTES - 1] == 0xFF)
-                memset(((u8*)res.data) + DP_DISTANCE_BYTES, 0xFF, sizeof(res.data) - DP_DISTANCE_BYTES);
+        if (dist[21] == 0xFF)
+                memset(((u8*)res.data) + 22, 0xFF, 18);
         else
-                memset(((u8*)res.data) + DP_DISTANCE_BYTES, 0, sizeof(res.data) - DP_DISTANCE_BYTES);
+                memset(((u8*)res.data) + 22, 0, 18);
         return res;
 }
 
@@ -374,7 +374,7 @@ static void ConsiderGapWithSet(const DistanceEntry& entry, const std::multiset<D
 struct DBRec
 {
 	u8 x[12];
-	u8 d[DP_DISTANCE_BYTES];
+	u8 d[22];
 	u8 type; //0 - tame, 1 - wild1, 2 - wild2
 };
 #pragma pack(pop)
@@ -523,7 +523,7 @@ void CheckNewPoints()
                 DBRec nrec;
                 u8* p = pPntList2 + i * GPU_DP_SIZE;
                 memcpy(nrec.x, p, 12);
-                memcpy(nrec.d, p + 16, DP_DISTANCE_BYTES);
+                memcpy(nrec.d, p + 16, 22);
                 nrec.type = gGenMode ? TAME : p[40];
 
                 EcInt fullDist = DeserializeDistance(nrec.d);
@@ -608,18 +608,18 @@ void CheckNewPoints()
 			if (pref->type != TAME)
 			{
 				memcpy(w.data, pref->d, sizeof(pref->d));
-				if (pref->d[DP_DISTANCE_BYTES - 1] == 0xFF) memset(((u8*)w.data) + DP_DISTANCE_BYTES, 0xFF, sizeof(w.data) - DP_DISTANCE_BYTES);
+				if (pref->d[21] == 0xFF) memset(((u8*)w.data) + 22, 0xFF, 18);
 				memcpy(t.data, nrec.d, sizeof(nrec.d));
-				if (nrec.d[DP_DISTANCE_BYTES - 1] == 0xFF) memset(((u8*)t.data) + DP_DISTANCE_BYTES, 0xFF, sizeof(t.data) - DP_DISTANCE_BYTES);
+				if (nrec.d[21] == 0xFF) memset(((u8*)t.data) + 22, 0xFF, 18);
 				TameType = nrec.type;
 				WildType = pref->type;
 			}
 			else
 			{
 				memcpy(w.data, nrec.d, sizeof(nrec.d));
-				if (nrec.d[DP_DISTANCE_BYTES - 1] == 0xFF) memset(((u8*)w.data) + DP_DISTANCE_BYTES, 0xFF, sizeof(w.data) - DP_DISTANCE_BYTES);
+				if (nrec.d[21] == 0xFF) memset(((u8*)w.data) + 22, 0xFF, 18);
 				memcpy(t.data, pref->d, sizeof(pref->d));
-				if (pref->d[DP_DISTANCE_BYTES - 1] == 0xFF) memset(((u8*)t.data) + DP_DISTANCE_BYTES, 0xFF, sizeof(t.data) - DP_DISTANCE_BYTES);
+				if (pref->d[21] == 0xFF) memset(((u8*)t.data) + 22, 0xFF, 18);
 				TameType = TAME;
 				WildType = nrec.type;
 			}
