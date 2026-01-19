@@ -407,7 +407,7 @@ __global__ void KernelA(const TKparams Kparams)
 			}
 
 			lds_jlist[8 * THREAD_X + (group % 8)] = jmp_ind;
-			if (((group + jlast_add) % 8) == 0)
+			if (((group + jlast_add) % 8) == 7)
 				st_cs_v4_b32(&jlist[(group / 8) * 32 + (THREAD_X % 32)], *(int4*)&lds_jlist[8 * THREAD_X]); //skip L2 cache
 
 			if (step_ind + MD_LEN >= STEP_CNT) //store last kangs to be able to find loop exit point
