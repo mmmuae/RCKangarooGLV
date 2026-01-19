@@ -11,6 +11,9 @@
 #include <set>
 #include <string>
 #include <algorithm>
+#include <atomic>
+#include <thread>
+#include <mutex>
 
 #include "cuda_runtime.h"
 #include "cuda.h"
@@ -50,13 +53,15 @@ u64 PntTotalOps;
 bool IsBench;
 
 // Statistics tracking
-volatile u64 gTameCount;
-volatile u64 gWild1Count;
-volatile u64 gWild2Count;
+std::atomic<u64> gTameCount;
+std::atomic<u64> gWild1Count;
+std::atomic<u64> gWild2Count;
 EcInt gLowestGap;
 EcInt gEstimatedKey;
 bool gHasLowestGap;
 bool gHasEstimatedKey;
+
+std::mutex gGapMutex;
 
 u32 gDP;
 u32 gRangeBits;
@@ -98,6 +103,50 @@ std::multiset<DistanceEntry, DistanceEntryLess> gWild2Distances;
 DistanceEntry gBestDistanceA;
 DistanceEntry gBestDistanceB;
 bool gHasGapPair;
+
+struct DpMeta
+{
+        EcInt dist;
+        int type;
+};
+
+static constexpr size_t kDpMetaQueueSize = 1u << 20;
+static_assert((kDpMetaQueueSize & (kDpMetaQueueSize - 1)) == 0, "kDpMetaQueueSize must be power of two");
+static std::vector<DpMeta> gDpMetaQueue;
+static std::atomic<size_t> gDpMetaHead{0};
+static std::atomic<size_t> gDpMetaTail{0};
+static std::atomic<bool> gDpMetaRunning{false};
+static std::thread gDpMetaThread;
+
+static void InitDpMetaQueue()
+{
+        if (gDpMetaQueue.size() != kDpMetaQueueSize)
+                gDpMetaQueue.resize(kDpMetaQueueSize);
+        gDpMetaHead.store(0, std::memory_order_release);
+        gDpMetaTail.store(0, std::memory_order_release);
+}
+
+static bool EnqueueDpMeta(const EcInt& dist, int type)
+{
+        size_t head = gDpMetaHead.load(std::memory_order_relaxed);
+        size_t next = (head + 1) & (kDpMetaQueueSize - 1);
+        if (next == gDpMetaTail.load(std::memory_order_acquire))
+                return false;
+        gDpMetaQueue[head] = DpMeta{dist, type};
+        gDpMetaHead.store(next, std::memory_order_release);
+        return true;
+}
+
+static bool TryDequeueDpMeta(DpMeta& out)
+{
+        size_t tail = gDpMetaTail.load(std::memory_order_relaxed);
+        if (tail == gDpMetaHead.load(std::memory_order_acquire))
+                return false;
+        out = gDpMetaQueue[tail];
+        size_t next = (tail + 1) & (kDpMetaQueueSize - 1);
+        gDpMetaTail.store(next, std::memory_order_release);
+        return true;
+}
 
 static int GetBitLength(const EcInt& val)
 {
@@ -340,6 +389,7 @@ static EcInt EstimateKeyFromPair(const DistanceEntry& a, const DistanceEntry& b)
 static void UpdateGlobalGap(const DistanceEntry& distA, const DistanceEntry& distB)
 {
         EcInt gap = AbsDistance(distA.dist, distB.dist);
+        std::lock_guard<std::mutex> lock(gGapMutex);
         if (!gHasLowestGap || gap.IsLessThanU(gLowestGap))
         {
                 gLowestGap = gap;
@@ -368,6 +418,68 @@ static void ConsiderGapWithSet(const DistanceEntry& entry, const std::multiset<D
                 --it;
                 UpdateGlobalGap(entry, *it);
         }
+}
+
+static void ProcessDpMeta(const DpMeta& meta)
+{
+        if (gGenMode)
+                return;
+
+        if (meta.type == TAME)
+                gTameCount.fetch_add(1, std::memory_order_relaxed);
+        else if (meta.type == WILD1)
+                gWild1Count.fetch_add(1, std::memory_order_relaxed);
+        else if (meta.type == WILD2)
+                gWild2Count.fetch_add(1, std::memory_order_relaxed);
+
+        DistanceEntry entry{meta.dist, meta.type};
+        if (meta.type == TAME)
+        {
+                gTameDistances.insert(entry);
+                ConsiderGapWithSet(entry, gWild1Distances);
+                ConsiderGapWithSet(entry, gWild2Distances);
+        }
+        else if (meta.type == WILD1)
+        {
+                gWild1Distances.insert(entry);
+                ConsiderGapWithSet(entry, gTameDistances);
+                ConsiderGapWithSet(entry, gWild2Distances);
+        }
+        else
+        {
+                gWild2Distances.insert(entry);
+                ConsiderGapWithSet(entry, gTameDistances);
+                ConsiderGapWithSet(entry, gWild1Distances);
+        }
+}
+
+static void DpMetaConsumerProc()
+{
+        DpMeta meta;
+        while (gDpMetaRunning.load(std::memory_order_acquire) ||
+               gDpMetaTail.load(std::memory_order_acquire) != gDpMetaHead.load(std::memory_order_acquire))
+        {
+                if (TryDequeueDpMeta(meta))
+                {
+                        ProcessDpMeta(meta);
+                        continue;
+                }
+                Sleep(1);
+        }
+}
+
+static void StartDpMetaConsumer()
+{
+        InitDpMetaQueue();
+        gDpMetaRunning.store(true, std::memory_order_release);
+        gDpMetaThread = std::thread(DpMetaConsumerProc);
+}
+
+static void StopDpMetaConsumer()
+{
+        gDpMetaRunning.store(false, std::memory_order_release);
+        if (gDpMetaThread.joinable())
+                gDpMetaThread.join();
 }
 
 #pragma pack(push, 1)
@@ -528,57 +640,8 @@ void CheckNewPoints()
 
                 EcInt fullDist = DeserializeDistance(nrec.d);
 
-                // Count DPs by type
                 if (!gGenMode)
-                {
-                        if (nrec.type == TAME)
-			{
-#ifdef _WIN32
-				InterlockedIncrement64((volatile LONGLONG*)&gTameCount);
-#else
-				__sync_fetch_and_add(&gTameCount, 1);
-#endif
-			}
-			else if (nrec.type == WILD1)
-			{
-#ifdef _WIN32
-				InterlockedIncrement64((volatile LONGLONG*)&gWild1Count);
-#else
-				__sync_fetch_and_add(&gWild1Count, 1);
-#endif
-			}
-			else if (nrec.type == WILD2)
-			{
-#ifdef _WIN32
-				InterlockedIncrement64((volatile LONGLONG*)&gWild2Count);
-#else
-                                __sync_fetch_and_add(&gWild2Count, 1);
-#endif
-                        }
-                }
-
-                if (!gGenMode)
-                {
-                        DistanceEntry entry{fullDist, nrec.type};
-                        if (nrec.type == TAME)
-                        {
-                                gTameDistances.insert(entry);
-                                ConsiderGapWithSet(entry, gWild1Distances);
-                                ConsiderGapWithSet(entry, gWild2Distances);
-                        }
-                        else if (nrec.type == WILD1)
-                        {
-                                gWild1Distances.insert(entry);
-                                ConsiderGapWithSet(entry, gTameDistances);
-                                ConsiderGapWithSet(entry, gWild2Distances);
-                        }
-                        else
-                        {
-                                gWild2Distances.insert(entry);
-                                ConsiderGapWithSet(entry, gTameDistances);
-                                ConsiderGapWithSet(entry, gWild1Distances);
-                        }
-                }
+                        EnqueueDpMeta(fullDist, nrec.type);
 
                 DBRec* pref = (DBRec*)db.FindOrAddDataBlock((u8*)&nrec);
                 if (gGenMode)
@@ -640,13 +703,16 @@ void CheckNewPoints()
 			}
 
                         // Solution found! Use actual found key
-                        gEstimatedKey = gPrivKey;
-                        if (!gStart.IsZero())
                         {
-                                EcInt ofs = gStart;
-                                gEstimatedKey.AddModP(ofs);
+                                std::lock_guard<std::mutex> lock(gGapMutex);
+                                gEstimatedKey = gPrivKey;
+                                if (!gStart.IsZero())
+                                {
+                                        EcInt ofs = gStart;
+                                        gEstimatedKey.AddModP(ofs);
+                                }
+                                gHasEstimatedKey = true;
                         }
-                        gHasEstimatedKey = true;
 
 			gSolved = true;
 			break;
@@ -686,15 +752,31 @@ void ShowStats(u64 tm_start, double exp_ops, double dp_val, u64 total_ops)
 	int hours = (int)(sec - days * (3600 * 24)) / 3600;
 	int min = (int)(sec - days * (3600 * 24) - hours * 3600) / 60;
 
-	// Calculate T/W ratio
-	u64 wildTotal = gWild1Count + gWild2Count;
-	double twRatio = (wildTotal > 0) ? ((double)gTameCount / (double)wildTotal) : 0.0;
+	u64 tameCount = gTameCount.load(std::memory_order_relaxed);
+	u64 wild1Count = gWild1Count.load(std::memory_order_relaxed);
+	u64 wild2Count = gWild2Count.load(std::memory_order_relaxed);
+	u64 wildTotal = wild1Count + wild2Count;
+	double twRatio = (wildTotal > 0) ? ((double)tameCount / (double)wildTotal) : 0.0;
+
+	bool hasLowestGap = false;
+	bool hasEstimatedKey = false;
+	EcInt lowestGap;
+	EcInt estimatedKey;
+	{
+		std::lock_guard<std::mutex> lock(gGapMutex);
+		hasLowestGap = gHasLowestGap;
+		hasEstimatedKey = gHasEstimatedKey;
+		if (hasLowestGap)
+			lowestGap = gLowestGap;
+		if (hasEstimatedKey)
+			estimatedKey = gEstimatedKey;
+	}
 
         // Format lowest gap using full precision converted to billions
         char gapStr[100];
-        if (gHasLowestGap)
+        if (hasLowestGap)
         {
-                double gapDisplay = EcIntToBillions(gLowestGap);
+                double gapDisplay = EcIntToBillions(lowestGap);
                 snprintf(gapStr, sizeof(gapStr), "%.1f", gapDisplay);
         }
         else
@@ -704,9 +786,9 @@ void ShowStats(u64 tm_start, double exp_ops, double dp_val, u64 total_ops)
 
         // Format estimated key (full decimal, no trimming)
         char keyStr[200];
-        if (gHasEstimatedKey)
+        if (hasEstimatedKey)
         {
-                std::string decimal = EcIntToDecimal(gEstimatedKey);
+                std::string decimal = EcIntToDecimal(estimatedKey);
                 strncpy(keyStr, decimal.c_str(), sizeof(keyStr) - 1);
                 keyStr[sizeof(keyStr) - 1] = 0;
         }
@@ -807,14 +889,17 @@ bool SolvePoint(EcPoint PntToSolve, EcInt& RangeWidth, int RangeBits, int DP, Ec
 	PntIndex = 0;
 
 	// Initialize statistics
-        gTameCount = 0;
-        gWild1Count = 0;
-        gWild2Count = 0;
-        gLowestGap.SetZero();
-        gHasLowestGap = false;
-        gEstimatedKey.SetZero();
-        gHasEstimatedKey = false;
-        gHasGapPair = false;
+        gTameCount.store(0, std::memory_order_relaxed);
+        gWild1Count.store(0, std::memory_order_relaxed);
+        gWild2Count.store(0, std::memory_order_relaxed);
+        {
+                std::lock_guard<std::mutex> lock(gGapMutex);
+                gLowestGap.SetZero();
+                gHasLowestGap = false;
+                gEstimatedKey.SetZero();
+                gHasEstimatedKey = false;
+                gHasGapPair = false;
+        }
         gTameDistances.clear();
         gWild1Distances.clear();
         gWild2Distances.clear();
@@ -888,6 +973,7 @@ bool SolvePoint(EcPoint PntToSolve, EcInt& RangeWidth, int RangeBits, int DP, Ec
 
 	u32 ThreadID;
 	gSolved = false;
+	StartDpMetaConsumer();
 	ThrCnt = GpuCnt;
 	for (int i = 0; i < GpuCnt; i++)
 	{
@@ -931,6 +1017,7 @@ bool SolvePoint(EcPoint PntToSolve, EcInt& RangeWidth, int RangeBits, int DP, Ec
 		pthread_join(thr_handles[i], NULL);
 #endif
 	}
+	StopDpMetaConsumer();
 
 	if (gIsOpsLimit)
 	{
