@@ -11,6 +11,13 @@
 
 // https://en.bitcoin.it/wiki/Secp256k1
 EcInt g_P; //FFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFE FFFFFC2F
+EcInt g_N; //FFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFE BAAEDCE6 AF48A03B BFD25E8C D0364141
+EcInt g_Lambda; //endomorphism eigenvalue
+EcInt g_Beta; //endomorphism field constant
+EcInt g_GlvMinusB1;
+EcInt g_GlvMinusB2;
+EcInt g_GlvG1;
+EcInt g_GlvG2;
 EcPoint g_G; //Generator point
 
 #define P_REV	0x00000001000003D1
@@ -109,6 +116,13 @@ bool EcPoint::SetHexStr(const char* str)
 void InitEc()
 {
 	g_P.SetHexStr("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F"); //Fp
+	g_N.SetHexStr("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141"); //n
+	g_Lambda.SetHexStr("5363AD4CC05C30E0A5261C028812645A122E22EA20816678DF02967C1B23BD72");
+	g_Beta.SetHexStr("7AE96A2B657C07106E64479EAC3434E99CF0497512F58995C1396C28719501EE");
+	g_GlvMinusB1.SetHexStr("E4437ED6010E88286F547FA90ABFE4C3");
+	g_GlvMinusB2.SetHexStr("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFE8A280AC50774346DD765CDA83DB1562C");
+	g_GlvG1.SetHexStr("3086D221A7D46BCDE86C90E49284EB153DAA8A1471E8CA7FE893209A45DBB031");
+	g_GlvG2.SetHexStr("E4437ED6010E88286F547FA90ABFE4C4221208AC9DF506C61571B4AE8AC47F71");
 	g_G.x.SetHexStr("79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798"); //G.x
 	g_G.y.SetHexStr("483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8"); //G.y
 #ifdef DEBUG_MODE
@@ -226,6 +240,45 @@ EcPoint Ec::MultiplyG(EcInt& k)
 	return res;
 }
 
+//k up to 256 bits, point can be arbitrary
+EcPoint Ec::Multiply(EcPoint& pnt, EcInt& k)
+{
+	EcPoint res;
+	EcPoint t = pnt;
+	bool first = true;
+	EcInt kk = k;
+	bool is_neg = (kk.data[4] >> 63) != 0;
+	if (is_neg)
+	{
+		kk.Neg();
+	}
+	int n = 3;
+	while ((n >= 0) && !kk.data[n])
+		n--;
+	if (n < 0)
+		return res; //error
+	int index;
+	_BitScanReverse64((DWORD*)&index, kk.data[n]);
+	for (int i = 0; i <= 64 * n + index; i++)
+	{
+		u8 v = (kk.data[i / 64] >> (i % 64)) & 1;
+		if (v)
+		{
+			if (first)
+			{
+				first = false;
+				res = t;
+			}
+			else
+				res = Ec::AddPoints(res, t);
+		}
+		t = Ec::DoublePoint(t);
+	}
+	if (is_neg)
+		res.y.NegModP();
+	return res;
+}
+
 #ifdef DEBUG_MODE
 //uses gTable (16x16-bit) to speedup calculation
 EcPoint Ec::MultiplyG_Fast(EcInt& k)
@@ -286,6 +339,201 @@ bool Ec::IsValidPoint(EcPoint& pnt)
 	y = pnt.y;
 	y.MulModP(pnt.y);
 	return x.IsEqual(y);
+}
+
+EcPoint Ec::Endomorphism(EcPoint& pnt)
+{
+	EcPoint res = pnt;
+	EcInt bx = res.x;
+	bx.MulModP(g_Beta);
+	res.x = bx;
+	return res;
+}
+
+static int CompareU64x8(const u64* a, const u64* b)
+{
+	for (int i = 7; i >= 0; --i)
+	{
+		if (a[i] != b[i])
+			return a[i] > b[i] ? 1 : -1;
+	}
+	return 0;
+}
+
+static void SubU64x8(u64* res, const u64* val)
+{
+	u8 c = _subborrow_u64(0, res[0], val[0], res + 0);
+	c = _subborrow_u64(c, res[1], val[1], res + 1);
+	c = _subborrow_u64(c, res[2], val[2], res + 2);
+	c = _subborrow_u64(c, res[3], val[3], res + 3);
+	c = _subborrow_u64(c, res[4], val[4], res + 4);
+	c = _subborrow_u64(c, res[5], val[5], res + 5);
+	c = _subborrow_u64(c, res[6], val[6], res + 6);
+	_subborrow_u64(c, res[7], val[7], res + 7);
+}
+
+static void Mul256To512(const u64* a, const u64* b, u64* out)
+{
+	memset(out, 0, sizeof(u64) * 8);
+	for (int i = 0; i < 4; ++i)
+	{
+		for (int j = 0; j < 4; ++j)
+		{
+			u64 hi;
+			u64 lo = _umul128(a[i], b[j], &hi);
+			u64 sum = 0;
+			u8 c = _addcarry_u64(0, out[i + j], lo, &sum);
+			c = _addcarry_u64(c, sum, 0, &sum);
+			out[i + j] = sum;
+			u64 carry = hi + c;
+			int idx = i + j + 1;
+			while (carry)
+			{
+				c = _addcarry_u64(0, out[idx], carry, out + idx);
+				carry = c;
+				idx++;
+				if (idx >= 8)
+					break;
+			}
+		}
+	}
+}
+
+static void BuildShiftedN(int shift, u64* out)
+{
+	memset(out, 0, sizeof(u64) * 8);
+	int limb_shift = shift / 64;
+	int bit_shift = shift % 64;
+	for (int i = 0; i < 4; ++i)
+	{
+		u64 part = g_N.data[i];
+		int idx = i + limb_shift;
+		if (idx < 8)
+		{
+			out[idx] |= part << bit_shift;
+			if (bit_shift && idx + 1 < 8)
+				out[idx + 1] |= part >> (64 - bit_shift);
+		}
+	}
+}
+
+static EcInt ReduceModN512(const u64* in)
+{
+	u64 rem[8];
+	memcpy(rem, in, sizeof(u64) * 8);
+	u64 shifted[8];
+	for (int shift = 255; shift >= 0; --shift)
+	{
+		BuildShiftedN(shift, shifted);
+		if (CompareU64x8(rem, shifted) >= 0)
+			SubU64x8(rem, shifted);
+	}
+	EcInt res;
+	res.SetZero();
+	memcpy(res.data, rem, 32);
+	return res;
+}
+
+static void AddModN(EcInt& acc, const EcInt& val)
+{
+	acc.Add(val);
+	if (!acc.IsLessThanU(g_N))
+		acc.Sub(g_N);
+}
+
+static void SubModN(EcInt& acc, const EcInt& val)
+{
+	if (acc.Sub(val))
+		acc.Add(g_N);
+}
+
+static EcInt MulModN(const EcInt& a, const EcInt& b)
+{
+	u64 prod[8];
+	Mul256To512(a.data, b.data, prod);
+	return ReduceModN512(prod);
+}
+
+static EcInt NormalizeToModN(const EcInt& val)
+{
+	EcInt res = val;
+	if (res.data[4] >> 63)
+	{
+		EcInt tmp = res;
+		tmp.Neg();
+		if (!tmp.IsZero())
+		{
+			res = g_N;
+			res.Sub(tmp);
+		}
+		else
+		{
+			res.SetZero();
+		}
+	}
+	while (!res.IsLessThanU(g_N))
+		res.Sub(g_N);
+	return res;
+}
+
+static EcInt MulShiftRound384(const EcInt& a, const EcInt& b)
+{
+	u64 prod[8];
+	Mul256To512(a.data, b.data, prod);
+	EcInt res;
+	res.SetZero();
+	res.data[0] = prod[6];
+	res.data[1] = prod[7];
+	if (prod[5] >> 63)
+	{
+		EcInt one;
+		one.Set(1);
+		res.Add(one);
+	}
+	return res;
+}
+
+static void NormalizeSigned128(EcInt& val)
+{
+	if (val.IsZero())
+		return;
+	bool needs_neg = (val.data[2] != 0) || (val.data[3] != 0) || ((val.data[1] >> 63) != 0);
+	if (needs_neg)
+	{
+		EcInt adj = g_N;
+		adj.Sub(val);
+		adj.Neg();
+		val = adj;
+	}
+}
+
+void Ec::GlvSplitScalar(EcInt& k, EcInt& k1, EcInt& k2)
+{
+	EcInt kk = NormalizeToModN(k);
+	EcInt c1 = MulShiftRound384(kk, g_GlvG1);
+	EcInt c2 = MulShiftRound384(kk, g_GlvG2);
+
+	EcInt t1 = MulModN(c1, g_GlvMinusB1);
+	EcInt t2 = MulModN(c2, g_GlvMinusB2);
+	k2 = t1;
+	AddModN(k2, t2);
+
+	EcInt tmp = MulModN(k2, g_Lambda);
+	k1 = kk;
+	SubModN(k1, tmp);
+
+	NormalizeSigned128(k1);
+	NormalizeSigned128(k2);
+}
+
+EcInt Ec::CombineScalar(EcInt& k1, EcInt& k2)
+{
+	EcInt s1 = NormalizeToModN(k1);
+	EcInt s2 = NormalizeToModN(k2);
+	EcInt tmp = MulModN(s2, g_Lambda);
+	EcInt res = s1;
+	AddModN(res, tmp);
+	return res;
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
