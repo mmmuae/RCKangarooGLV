@@ -307,6 +307,19 @@ static void CanonicalizeGlvPairForOrdering(const EcInt& k1, const EcInt& k2, EcI
         out2 = best2;
 }
 
+static void ApplyGlvTransformPair(const EcInt& k1, const EcInt& k2, int rot, bool neg, EcInt& out1, EcInt& out2)
+{
+        EcInt r1, r2;
+        ApplyGlvRotation(k1, k2, rot, r1, r2);
+        if (neg)
+        {
+                r1.Neg();
+                r2.Neg();
+        }
+        out1 = r1;
+        out2 = r2;
+}
+
 static void UncanonicalizeGlvPair(const EcInt& k1, const EcInt& k2, u8 tag, EcInt& out1, EcInt& out2)
 {
         int rot = tag & 0x3;
@@ -326,6 +339,21 @@ static void UncanonicalizeGlvPair(const EcInt& k1, const EcInt& k2, u8 tag, EcIn
                 inv_rot = 1;
 
         ApplyGlvRotation(a, b, inv_rot, out1, out2);
+}
+
+static bool TryCollisionWithTransforms(EcPoint& pnt, const EcInt& t1, const EcInt& t2, int TameType, const EcInt& w1, const EcInt& w2, int WildType)
+{
+        for (int rot = 0; rot < 3; ++rot)
+        {
+                for (int neg = 0; neg < 2; ++neg)
+                {
+                        EcInt tw1, tw2;
+                        ApplyGlvTransformPair(w1, w2, rot, neg != 0, tw1, tw2);
+                        if (Collision_SOTA(pnt, t1, t2, TameType, tw1, tw2, WildType, false))
+                                return true;
+                }
+        }
+        return false;
 }
 
 static EcInt CombineScalarDistanceForOrdering(const EcInt& k1, const EcInt& k2)
@@ -920,15 +948,22 @@ void CheckNewPoints()
 		}
 
 			// Verify if this is a collision (matching X coordinate)
-			bool res = Collision_SOTA(gPntToSolve, t1, t2, TameType, w1, w2, WildType, false);
-			if (!gGlvCanonicalWalk)
+			bool res = false;
+			if (gGlvCanonicalWalk)
+			{
+				res = TryCollisionWithTransforms(gPntToSolve, t1, t2, TameType, w1, w2, WildType);
+			}
+			else
+			{
+				res = Collision_SOTA(gPntToSolve, t1, t2, TameType, w1, w2, WildType, false);
 				res = res || Collision_SOTA(gPntToSolve, t1, t2, TameType, w1, w2, WildType, true);
+			}
 			if (!res)
 			{
 				bool w12 = ((prefType == WILD1) && (nrecType == WILD2)) || ((prefType == WILD2) && (nrecType == WILD1));
 				if (w12) //in rare cases WILD and WILD2 can collide in mirror, in this case there is no way to find K
 					;// ToLog("W1 and W2 collides in mirror");
-				else
+				else if (!gGlvCanonicalWalk)
 				{
 					printf("\n\rCollision Error\r\n");
 					gTotalErrors++;
@@ -1384,7 +1419,7 @@ bool ParseCommandLine(int argc, char* argv[])
 			}
 			int val = atoi(argv[ci]);
 			ci++;
-			if ((val < 14) || (val > 60))
+			if ((val < 1) || (val > 60))
 			{
 				printf("error: invalid value for -d option\r\n");
 				return false;
