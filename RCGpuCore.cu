@@ -494,22 +494,38 @@ __device__ __forceinline__ void BuildDP(const TKparams& Kparams, int kang_ind, u
 	u32* DPs = Kparams.DPs_out + 4 + pos * GPU_DP_SIZE / 4;
 	*(int4*)&DPs[0] = rx;
 	*(int4*)&DPs[4] = ((int4*)d)[0];
-	*(u64*)&DPs[8] = d[2];
-	DPs[10] = 3 * kang_ind / Kparams.KangCnt; //kang type
+	*(int4*)&DPs[8] = ((int4*)d)[1];
+	DPs[12] = 3 * kang_ind / Kparams.KangCnt; //kang type
 }
 
 __device__ __forceinline__ bool ProcessJumpDistance(u32 step_ind, u32 d_cur, u64* d, u32 kang_ind, u64* jmp1_d, u64* jmp2_d, const TKparams& Kparams, u64* table, u32* cur_ind, u8 iter)
 {
 	u64* jmp_d = (d_cur & JMP2_FLAG) ? jmp2_d : jmp1_d;
 
-	__align__(16) u64 jmp[3];
+	__align__(16) u64 jmp[4];
 	((int4*)(jmp))[0] = ((int4*)(jmp_d + 4 * (d_cur & JMP_MASK)))[0];
-	jmp[2] = *(jmp_d + 4 * (d_cur & JMP_MASK) + 2);
+	((int4*)(jmp))[1] = ((int4*)(jmp_d + 4 * (d_cur & JMP_MASK) + 2))[0];
 
-	if (d_cur & INV_FLAG)
-		Sub192from192(d, jmp)
-	else
-		Add192to192(d, jmp);
+	if (Kparams.IsGlvMode)
+	{
+		if (d_cur & INV_FLAG)
+		{
+			Sub128from128(d, jmp);
+			Sub128from128(d + 2, jmp + 2);
+		}
+		else
+		{
+			Add128to128(d, jmp);
+			Add128to128(d + 2, jmp + 2);
+		}
+	}
+		else
+		{
+			if (d_cur & INV_FLAG)
+				Sub256from256(d, jmp);
+			else
+				Add256to256(d, jmp);
+		}
 
 	//check in table
 	int found_ind = iter + MD_LEN - 4;
@@ -574,19 +590,21 @@ __device__ __forceinline__ bool ProcessJumpDistance(u32 step_ind, u32 d_cur, u64
 extern "C" __launch_bounds__(BLOCK_SIZE, 1)
 __global__ void KernelB(const TKparams Kparams)
 {
-	u64* jmp1_d = LDS; //16KB, 192bit jumps
-	u64* jmp2_d = LDS + 4 * JMP_CNT; //16KB, 192bit jumps
+	u64* jmp1_d = LDS; //16KB, 256bit jumps
+	u64* jmp2_d = LDS + 4 * JMP_CNT; //16KB, 256bit jumps
 
 	int i = THREAD_X;
 	while (i < JMP_CNT)
 	{
-		//192bits but we need align 128 so use 256
+		//256bits stored in 4x64
 		jmp1_d[4 * i + 0] = Kparams.Jumps1[12 * i + 8];
 		jmp1_d[4 * i + 1] = Kparams.Jumps1[12 * i + 9];
 		jmp1_d[4 * i + 2] = Kparams.Jumps1[12 * i + 10];
+		jmp1_d[4 * i + 3] = Kparams.Jumps1[12 * i + 11];
 		jmp2_d[4 * i + 0] = Kparams.Jumps2[12 * i + 8];
 		jmp2_d[4 * i + 1] = Kparams.Jumps2[12 * i + 9];
 		jmp2_d[4 * i + 2] = Kparams.Jumps2[12 * i + 10];
+		jmp2_d[4 * i + 3] = Kparams.Jumps2[12 * i + 11];
 		i += BLOCK_SIZE;
 	}
 
@@ -620,13 +638,15 @@ __global__ void KernelB(const TKparams Kparams)
 		u32 kang_ind = (BLOCK_X * BLOCK_SIZE) * PNT_GROUP_CNT;
 		kang_ind += (32 * warp_ind + thr_ind) * PNT_GROUP_CNT + 8 * g8_ind + gr_ind;
 
-		__align__(8) u64 dA[3], dB[3];
+		__align__(16) u64 dA[4], dB[4];
 		dA[0] = Kparams.Kangs[kang_ind * 12 + 8];
 		dA[1] = Kparams.Kangs[kang_ind * 12 + 9];
 		dA[2] = Kparams.Kangs[kang_ind * 12 + 10];
+		dA[3] = Kparams.Kangs[kang_ind * 12 + 11];
 		dB[0] = Kparams.Kangs[(kang_ind + 1) * 12 + 8];
 		dB[1] = Kparams.Kangs[(kang_ind + 1) * 12 + 9];
 		dB[2] = Kparams.Kangs[(kang_ind + 1) * 12 + 10];
+		dB[3] = Kparams.Kangs[(kang_ind + 1) * 12 + 11];
 
 		bool LoopedA = false;
 		bool LoopedB = false;
@@ -648,9 +668,11 @@ __global__ void KernelB(const TKparams Kparams)
 		Kparams.Kangs[kang_ind * 12 + 8] = dA[0];
 		Kparams.Kangs[kang_ind * 12 + 9] = dA[1];
 		Kparams.Kangs[kang_ind * 12 + 10] = dA[2];
+		Kparams.Kangs[kang_ind * 12 + 11] = dA[3];
 		Kparams.Kangs[(kang_ind + 1) * 12 + 8] = dB[0];
 		Kparams.Kangs[(kang_ind + 1) * 12 + 9] = dB[1];
 		Kparams.Kangs[(kang_ind + 1) * 12 + 10] = dB[2];
+		Kparams.Kangs[(kang_ind + 1) * 12 + 11] = dB[3];
 
 		//store so cur_ind is 0 at next loading
 		#pragma unroll
@@ -744,17 +766,35 @@ __global__ void KernelC(const TKparams Kparams)
 		Kparams.Kangs[kang_ind * 12 + 7] = y[3];
 
 		//add distance
-		u64 d[3];
+		u64 d[4];
 		d[0] = Kparams.Kangs[kang_ind * 12 + 8];
 		d[1] = Kparams.Kangs[kang_ind * 12 + 9];
 		d[2] = Kparams.Kangs[kang_ind * 12 + 10];
-		if (inv_flag)
-			Sub192from192(d, jmp3_table + 12 * jmp_ind + 8)
+		d[3] = Kparams.Kangs[kang_ind * 12 + 11];
+		if (Kparams.IsGlvMode)
+		{
+			if (inv_flag)
+			{
+				Sub128from128(d, jmp3_table + 12 * jmp_ind + 8);
+				Sub128from128(d + 2, jmp3_table + 12 * jmp_ind + 10);
+			}
+			else
+			{
+				Add128to128(d, jmp3_table + 12 * jmp_ind + 8);
+				Add128to128(d + 2, jmp3_table + 12 * jmp_ind + 10);
+			}
+		}
 		else
-			Add192to192(d, jmp3_table + 12 * jmp_ind + 8);
+		{
+			if (inv_flag)
+				Sub256from256(d, jmp3_table + 12 * jmp_ind + 8);
+			else
+				Add256to256(d, jmp3_table + 12 * jmp_ind + 8);
+		}
 		Kparams.Kangs[kang_ind * 12 + 8] = d[0];
 		Kparams.Kangs[kang_ind * 12 + 9] = d[1];
 		Kparams.Kangs[kang_ind * 12 + 10] = d[2];
+		Kparams.Kangs[kang_ind * 12 + 11] = d[3];
 
 #ifndef OLD_GPU
 		atomicAnd(&Kparams.L1S2[block_ind * BLOCK_SIZE + thr_ind], ~(1u << gr_ind));
@@ -774,6 +814,10 @@ __global__ void KernelC(const TKparams Kparams)
 #define GY_1	0xFD17B448A6855419ull
 #define GY_2	0x5DA4FBFC0E1108A8ull
 #define GY_3	0x483ADA7726A3C465ull
+#define PHI_GX_0	0xA7BBA04400B88FCBull
+#define PHI_GX_1	0x872844067F15E98Dull
+#define PHI_GX_2	0xAB0102B696902325ull
+#define PHI_GX_3	0xBCACE2E99DA01887ull
 
 __device__ __forceinline__ void AddPoints(u64* res_x, u64* res_y, u64* pnt1x, u64* pnt1y, u64* pnt2x, u64* pnt2y)
 {
@@ -815,7 +859,7 @@ __global__ void KernelGen(const TKparams Kparams)
 {
 	for (u32 group = 0; group < PNT_GROUP_CNT; group++)
 	{
-		__align__(16) u64 x0[4], y0[4], d[3];
+		__align__(16) u64 x0[4], y0[4], d[4];
 		__align__(16) u64 x[4], y[4];
 		__align__(16) u64 tx[4], ty[4];
 		__align__(16) u64 t2x[4], t2y[4];
@@ -832,38 +876,147 @@ __global__ void KernelGen(const TKparams Kparams)
 		d[0] = Kparams.Kangs[kang_ind * 12 + 8];
 		d[1] = Kparams.Kangs[kang_ind * 12 + 9];
 		d[2] = Kparams.Kangs[kang_ind * 12 + 10];
+		d[3] = Kparams.Kangs[kang_ind * 12 + 11];
 		
-		tx[0] = GX_0; tx[1] = GX_1; tx[2] = GX_2; tx[3] = GX_3;
-		ty[0] = GY_0; ty[1] = GY_1; ty[2] = GY_2; ty[3] = GY_3;
-
 		bool first = true;
-		int n = 2;
-		while ((n >= 0) && !d[n]) 
-			n--;
-		if (n < 0)
-			continue; //error
-		int index = __clzll(d[n]);
-		for (int i = 0; i <= 64 * n + (63 - index); i++)
+		if (!Kparams.IsGlvMode)
 		{
-			u8 v = (d[i / 64] >> (i % 64)) & 1;
-			if (v)
+			tx[0] = GX_0; tx[1] = GX_1; tx[2] = GX_2; tx[3] = GX_3;
+			ty[0] = GY_0; ty[1] = GY_1; ty[2] = GY_2; ty[3] = GY_3;
+
+			int n = 3;
+			while ((n >= 0) && !d[n])
+				n--;
+			if (n < 0)
+				continue; //error
+			int index = __clzll(d[n]);
+			for (int i = 0; i <= 64 * n + (63 - index); i++)
 			{
-				if (first)
+				u8 v = (d[i / 64] >> (i % 64)) & 1;
+				if (v)
 				{
-					first = false;
-					Copy_u64_x4(x, tx);
-					Copy_u64_x4(y, ty);
+					if (first)
+					{
+						first = false;
+						Copy_u64_x4(x, tx);
+						Copy_u64_x4(y, ty);
+					}
+					else
+					{
+						AddPoints(t2x, t2y, x, y, tx, ty);
+						Copy_u64_x4(x, t2x);
+						Copy_u64_x4(y, t2y);
+					}
 				}
-				else
-				{
-					AddPoints(t2x, t2y, x, y, tx, ty);
-					Copy_u64_x4(x, t2x);
-					Copy_u64_x4(y, t2y);
-				}
+				DoublePoint(t2x, t2y, tx, ty);
+				Copy_u64_x4(tx, t2x);
+				Copy_u64_x4(ty, t2y);
 			}
-			DoublePoint(t2x, t2y, tx, ty);
-			Copy_u64_x4(tx, t2x);
-			Copy_u64_x4(ty, t2y);
+		}
+		else
+		{
+			u64 k1[2] = { d[0], d[1] };
+			u64 k2[2] = { d[2], d[3] };
+			bool neg1 = (k1[1] >> 63) != 0;
+			bool neg2 = (k2[1] >> 63) != 0;
+			if (neg1)
+			{
+				k1[0] = ~k1[0] + 1;
+				k1[1] = ~k1[1] + (k1[0] == 0);
+			}
+			if (neg2)
+			{
+				k2[0] = ~k2[0] + 1;
+				k2[1] = ~k2[1] + (k2[0] == 0);
+			}
+			bool has_p1 = k1[0] || k1[1];
+			bool has_p2 = k2[0] || k2[1];
+			u64 p1x[4], p1y[4];
+			u64 p2x[4], p2y[4];
+			if (has_p1)
+			{
+				tx[0] = GX_0; tx[1] = GX_1; tx[2] = GX_2; tx[3] = GX_3;
+				ty[0] = GY_0; ty[1] = GY_1; ty[2] = GY_2; ty[3] = GY_3;
+				first = true;
+				int n = k1[1] ? 1 : 0;
+				int index = __clzll(k1[n]);
+				for (int i = 0; i <= 64 * n + (63 - index); i++)
+				{
+					u8 v = (k1[i / 64] >> (i % 64)) & 1;
+					if (v)
+					{
+						if (first)
+						{
+							first = false;
+							Copy_u64_x4(p1x, tx);
+							Copy_u64_x4(p1y, ty);
+						}
+						else
+						{
+							AddPoints(t2x, t2y, p1x, p1y, tx, ty);
+							Copy_u64_x4(p1x, t2x);
+							Copy_u64_x4(p1y, t2y);
+						}
+					}
+					DoublePoint(t2x, t2y, tx, ty);
+					Copy_u64_x4(tx, t2x);
+					Copy_u64_x4(ty, t2y);
+				}
+				if (neg1)
+					NegModP(p1y);
+			}
+			if (has_p2)
+			{
+				tx[0] = PHI_GX_0; tx[1] = PHI_GX_1; tx[2] = PHI_GX_2; tx[3] = PHI_GX_3;
+				ty[0] = GY_0; ty[1] = GY_1; ty[2] = GY_2; ty[3] = GY_3;
+				first = true;
+				int n = k2[1] ? 1 : 0;
+				int index = __clzll(k2[n]);
+				for (int i = 0; i <= 64 * n + (63 - index); i++)
+				{
+					u8 v = (k2[i / 64] >> (i % 64)) & 1;
+					if (v)
+					{
+						if (first)
+						{
+							first = false;
+							Copy_u64_x4(p2x, tx);
+							Copy_u64_x4(p2y, ty);
+						}
+						else
+						{
+							AddPoints(t2x, t2y, p2x, p2y, tx, ty);
+							Copy_u64_x4(p2x, t2x);
+							Copy_u64_x4(p2y, t2y);
+						}
+					}
+					DoublePoint(t2x, t2y, tx, ty);
+					Copy_u64_x4(tx, t2x);
+					Copy_u64_x4(ty, t2y);
+				}
+				if (neg2)
+					NegModP(p2y);
+			}
+			if (has_p1 && has_p2)
+			{
+				AddPoints(t2x, t2y, p1x, p1y, p2x, p2y);
+				Copy_u64_x4(x, t2x);
+				Copy_u64_x4(y, t2y);
+			}
+			else if (has_p1)
+			{
+				Copy_u64_x4(x, p1x);
+				Copy_u64_x4(y, p1y);
+			}
+			else if (has_p2)
+			{
+				Copy_u64_x4(x, p2x);
+				Copy_u64_x4(y, p2y);
+			}
+			else
+			{
+				continue;
+			}
 		}
 
 		if (!Kparams.IsGenMode)

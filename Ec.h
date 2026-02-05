@@ -65,12 +65,16 @@ class Ec
 public:
 	static EcPoint AddPoints(EcPoint& pnt1, EcPoint& pnt2);
 	static EcPoint DoublePoint(EcPoint& pnt);
+	static EcPoint Multiply(EcPoint& pnt, EcInt& k);
 	static EcPoint MultiplyG(EcInt& k);
 #ifdef DEBUG_MODE
 	static EcPoint MultiplyG_Fast(EcInt& k);
 #endif
 	static EcInt CalcY(EcInt& x, bool is_even);
 	static bool IsValidPoint(EcPoint& pnt);
+	static EcPoint Endomorphism(EcPoint& pnt);
+	static void GlvSplitScalar(EcInt& k, EcInt& k1, EcInt& k2);
+	static EcInt CombineScalar(EcInt& k1, EcInt& k2);
 };
 
 void InitEc();
