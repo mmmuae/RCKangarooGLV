@@ -137,6 +137,25 @@ static u8 UnpackTag(u8 packed)
         return (packed & kTagMask) >> kTagShift;
 }
 
+static constexpr u8 kTypeMask = 0x3;
+static constexpr u8 kTagShift = 2;
+static constexpr u8 kTagMask = 0x7 << kTagShift;
+
+static u8 PackTypeTag(u8 type, u8 tag)
+{
+        return (type & kTypeMask) | ((tag & 0x7) << kTagShift);
+}
+
+static u8 UnpackType(u8 packed)
+{
+        return packed & kTypeMask;
+}
+
+static u8 UnpackTag(u8 packed)
+{
+        return (packed & kTagMask) >> kTagShift;
+}
+
 static constexpr size_t kDpMetaQueueSize = 1u << 20;
 static_assert((kDpMetaQueueSize & (kDpMetaQueueSize - 1)) == 0, "kDpMetaQueueSize must be power of two");
 static std::vector<DpMeta> gDpMetaQueue;
