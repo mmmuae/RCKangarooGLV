@@ -279,45 +279,6 @@ EcPoint Ec::Multiply(EcPoint& pnt, EcInt& k)
 	return res;
 }
 
-//k up to 256 bits, point can be arbitrary
-EcPoint Ec::Multiply(EcPoint& pnt, EcInt& k)
-{
-	EcPoint res;
-	EcPoint t = pnt;
-	bool first = true;
-	EcInt kk = k;
-	bool is_neg = (kk.data[4] >> 63) != 0;
-	if (is_neg)
-	{
-		kk.Neg();
-	}
-	int n = 3;
-	while ((n >= 0) && !kk.data[n])
-		n--;
-	if (n < 0)
-		return res; //error
-	int index;
-	_BitScanReverse64((DWORD*)&index, kk.data[n]);
-	for (int i = 0; i <= 64 * n + index; i++)
-	{
-		u8 v = (kk.data[i / 64] >> (i % 64)) & 1;
-		if (v)
-		{
-			if (first)
-			{
-				first = false;
-				res = t;
-			}
-			else
-				res = Ec::AddPoints(res, t);
-		}
-		t = Ec::DoublePoint(t);
-	}
-	if (is_neg)
-		res.y.NegModP();
-	return res;
-}
-
 #ifdef DEBUG_MODE
 //uses gTable (16x16-bit) to speedup calculation
 EcPoint Ec::MultiplyG_Fast(EcInt& k)
@@ -378,15 +339,6 @@ bool Ec::IsValidPoint(EcPoint& pnt)
 	y = pnt.y;
 	y.MulModP(pnt.y);
 	return x.IsEqual(y);
-}
-
-EcPoint Ec::Endomorphism(EcPoint& pnt)
-{
-	EcPoint res = pnt;
-	EcInt bx = res.x;
-	bx.MulModP(g_Beta);
-	res.x = bx;
-	return res;
 }
 
 static int CompareU64x8(const u64* a, const u64* b)
