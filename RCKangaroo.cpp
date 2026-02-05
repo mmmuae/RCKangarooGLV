@@ -11,6 +11,7 @@
 #include <set>
 #include <string>
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <thread>
 #include <mutex>
@@ -343,15 +344,39 @@ static void UncanonicalizeGlvPair(const EcInt& k1, const EcInt& k2, u8 tag, EcIn
         ApplyGlvRotation(a, b, inv_rot, out1, out2);
 }
 
-static bool TryCollisionWithTransforms(EcPoint& pnt, const EcInt& t1, const EcInt& t2, int TameType, const EcInt& w1, const EcInt& w2, int WildType)
+struct GlvPair
 {
+        EcInt k1;
+        EcInt k2;
+};
+
+static std::array<GlvPair, 6> BuildGlvTransforms(const EcInt& k1, const EcInt& k2)
+{
+        std::array<GlvPair, 6> res;
+        int idx = 0;
         for (int rot = 0; rot < 3; ++rot)
         {
                 for (int neg = 0; neg < 2; ++neg)
                 {
-                        EcInt tw1, tw2;
-                        ApplyGlvTransformPair(w1, w2, rot, neg != 0, tw1, tw2);
-                        if (Collision_SOTA(pnt, t1, t2, TameType, tw1, tw2, WildType, false))
+                        ApplyGlvTransformPair(k1, k2, rot, neg != 0, res[idx].k1, res[idx].k2);
+                        ++idx;
+                }
+        }
+        return res;
+}
+
+static bool TryCollisionWithTransforms(EcPoint& pnt, const EcInt& t1, const EcInt& t2, int TameType, const EcInt& w1, const EcInt& w2, int WildType)
+{
+        auto tameTransforms = BuildGlvTransforms(t1, t2);
+        auto wildTransforms = BuildGlvTransforms(w1, w2);
+
+        for (const auto& tame : tameTransforms)
+        {
+                for (const auto& wild : wildTransforms)
+                {
+                        if (Collision_SOTA(pnt, tame.k1, tame.k2, TameType, wild.k1, wild.k2, WildType, false))
+                                return true;
+                        if (Collision_SOTA(pnt, tame.k1, tame.k2, TameType, wild.k1, wild.k2, WildType, true))
                                 return true;
                 }
         }
