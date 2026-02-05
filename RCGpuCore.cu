@@ -522,9 +522,13 @@ __device__ __forceinline__ bool ProcessJumpDistance(u32 step_ind, u32 d_cur, u64
 	else
 	{
 		if (d_cur & INV_FLAG)
+		{
 			Sub256from256(d, jmp);
+		}
 		else
+		{
 			Add256to256(d, jmp);
+		}
 	}
 
 	//check in table
@@ -784,13 +788,17 @@ __global__ void KernelC(const TKparams Kparams)
 				Add128to128(d + 2, jmp3_table + 12 * jmp_ind + 10);
 			}
 		}
+	else
+	{
+		if (inv_flag)
+		{
+			Sub256from256(d, jmp3_table + 12 * jmp_ind + 8);
+		}
 		else
 		{
-			if (inv_flag)
-				Sub256from256(d, jmp3_table + 12 * jmp_ind + 8);
-			else
-				Add256to256(d, jmp3_table + 12 * jmp_ind + 8);
+			Add256to256(d, jmp3_table + 12 * jmp_ind + 8);
 		}
+	}
 		Kparams.Kangs[kang_ind * 12 + 8] = d[0];
 		Kparams.Kangs[kang_ind * 12 + 9] = d[1];
 		Kparams.Kangs[kang_ind * 12 + 10] = d[2];
