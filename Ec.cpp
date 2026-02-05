@@ -493,6 +493,20 @@ static EcInt MulShiftRound384(const EcInt& a, const EcInt& b)
 	return res;
 }
 
+static void NormalizeSigned128(EcInt& val)
+{
+	if (val.IsZero())
+		return;
+	bool needs_neg = (val.data[2] != 0) || (val.data[3] != 0) || ((val.data[1] >> 63) != 0);
+	if (needs_neg)
+	{
+		EcInt adj = g_N;
+		adj.Sub(val);
+		adj.Neg();
+		val = adj;
+	}
+}
+
 void Ec::GlvSplitScalar(EcInt& k, EcInt& k1, EcInt& k2)
 {
 	EcInt kk = NormalizeToModN(k);
@@ -508,20 +522,8 @@ void Ec::GlvSplitScalar(EcInt& k, EcInt& k1, EcInt& k2)
 	k1 = kk;
 	SubModN(k1, tmp);
 
-	if (k1.data[2] || k1.data[3])
-	{
-		EcInt adj = g_N;
-		adj.Sub(k1);
-		adj.Neg();
-		k1 = adj;
-	}
-	if (k2.data[2] || k2.data[3])
-	{
-		EcInt adj = g_N;
-		adj.Sub(k2);
-		adj.Neg();
-		k2 = adj;
-	}
+	NormalizeSigned128(k1);
+	NormalizeSigned128(k2);
 }
 
 EcInt Ec::CombineScalar(EcInt& k1, EcInt& k2)
