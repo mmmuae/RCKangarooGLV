@@ -66,7 +66,7 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _RangeBits, int _DP, EcInt _Ran
 	KangCnt = Kparams.BlockSize * Kparams.GroupCnt * Kparams.BlockCnt;
 	Kparams.KangCnt = KangCnt;
 	Kparams.DP = DP;
-	Kparams.KernelA_LDS_Size = 64 * JMP_CNT + 16 * Kparams.BlockSize;
+	Kparams.KernelA_LDS_Size = 64 * JMP_CNT + 32 * Kparams.BlockSize;
 	Kparams.KernelB_LDS_Size = 64 * JMP_CNT;
 	Kparams.KernelC_LDS_Size = 96 * JMP_CNT;
 	Kparams.IsGenMode = gGenMode;
@@ -151,6 +151,13 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _RangeBits, int _DP, EcInt _Ran
 	if (err != cudaSuccess)
 	{
 		printf("GPU %d Allocate JumpsList memory failed: %s\n", CudaIndex, cudaGetErrorString(err));
+		return false;
+	}
+
+	err = cudaMalloc((void**)&Kparams.JumpsTag, size);
+	if (err != cudaSuccess)
+	{
+		printf("GPU %d Allocate JumpsTag memory failed: %s\n", CudaIndex, cudaGetErrorString(err));
 		return false;
 	}
 
@@ -284,6 +291,7 @@ void RCGpuKang::Release()
 	cudaFree(Kparams.LastPnts);
 	cudaFree(Kparams.L1S2);
 	cudaFree(Kparams.DPTable);
+	cudaFree(Kparams.JumpsTag);
 	cudaFree(Kparams.JumpsList);
 	cudaFree(Kparams.Jumps3);
 	cudaFree(Kparams.Jumps2);
