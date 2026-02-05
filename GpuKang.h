@@ -35,6 +35,7 @@ private:
         Ec ec;
 
 	u32* DPs_out;
+	u32 DPOutMax;
         TKparams Kparams;
 
         EcInt HalfRange;

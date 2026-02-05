@@ -284,15 +284,16 @@ u16* lds_jtag = lds_jlist + 8 * BLOCK_SIZE;
             if (Kparams.IsGlvMode)
                 tag = (u16)CanonicalizePointGlv(x, y);
 
-            if ((x[3] & dp_mask64) == 0)
-            {
-                u32 kang_ind = (THREAD_X + BLOCK_X * BLOCK_SIZE) * PNT_GROUP_CNT + group;
-                u32 ind = atomicAdd(Kparams.DPTable + kang_ind, 1);
-                ind = min(ind, DPTABLE_MAX_CNT - 1);
-                int4* dst = (int4*)(Kparams.DPTable + Kparams.KangCnt + (kang_ind * DPTABLE_MAX_CNT + ind) * 4);
-                dst[0] = ((int4*)x)[0];
-                jmp_ind |= DP_FLAG;
-            }
+			if ((x[3] & dp_mask64) == 0)
+			{
+				u32 kang_ind = (THREAD_X + BLOCK_X * BLOCK_SIZE) * PNT_GROUP_CNT + group;
+				u32 ind = atomicAdd(Kparams.DPTable + kang_ind, 1);
+				ind = min(ind, DPTABLE_MAX_CNT - 1);
+				int4* dst = (int4*)(Kparams.DPTable + Kparams.KangCnt + (kang_ind * DPTABLE_MAX_CNT + ind) * 4);
+				dst[0] = ((int4*)x)[0];
+				Kparams.DPTag[kang_ind * DPTABLE_MAX_CNT + ind] = tag;
+				jmp_ind |= DP_FLAG;
+			}
 
             lds_jlist[8 * THREAD_X + (group % 8)] = jmp_ind;
             lds_jtag[8 * THREAD_X + (group % 8)] = tag;
@@ -539,14 +540,7 @@ __global__ void KernelA(const TKparams Kparams)
 				u32 ind = atomicAdd(Kparams.DPTable + kang_ind, 1);
 				ind = min(ind, DPTABLE_MAX_CNT - 1);
 				int4* dst = (int4*)(Kparams.DPTable + Kparams.KangCnt + (kang_ind * DPTABLE_MAX_CNT + ind) * 4);
-				u32 tag = 0;
-				u64 x_can[4];
-				u64 y_can[4];
-				Copy256(x_can, x);
-				Copy256(y_can, y);
-				if (Kparams.IsGlvMode)
-					tag = CanonicalizePointGlv(x_can, y_can);
-				dst[0] = ((int4*)x_can)[0];
+				dst[0] = ((int4*)x)[0];
 				Kparams.DPTag[kang_ind * DPTABLE_MAX_CNT + ind] = tag;
 				jmp_ind |= DP_FLAG;
 			}
@@ -638,10 +632,13 @@ __device__ __forceinline__ void BuildDP(const TKparams& Kparams, int kang_ind, u
 	if (ind >= DPTABLE_MAX_CNT)
 		return;
 	int4 rx = *(int4*)(Kparams.DPTable + Kparams.KangCnt + (kang_ind * DPTABLE_MAX_CNT + ind) * 4);
+	u32 tag = 0;
+	if (Kparams.IsGlvMode)
+		tag = Kparams.DPTag[kang_ind * DPTABLE_MAX_CNT + ind] & 0x7;
 	u64 d1[2] = {d[0], d[1]};
 	u64 d2[2] = {d[2], d[3]};
 	u32 pos = atomicAdd(Kparams.DPs_out, 1);
-	pos = min(pos, MAX_DP_CNT - 1);
+	pos = min(pos, Kparams.DPOutMax - 1);
 	u32* DPs = Kparams.DPs_out + 4 + pos * GPU_DP_SIZE / 4;
 	*(int4*)&DPs[0] = rx;
 	DPs[4] = (u32)d1[0];
@@ -653,6 +650,7 @@ __device__ __forceinline__ void BuildDP(const TKparams& Kparams, int kang_ind, u
 	DPs[10] = (u32)d2[1];
 	DPs[11] = (u32)(d2[1] >> 32);
 	DPs[12] = 3 * kang_ind / Kparams.KangCnt; //kang type
+	DPs[13] = tag;
 }
 
 template <bool kGlvMode>
