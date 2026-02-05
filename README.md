@@ -34,7 +34,13 @@ Discussion thread: https://bitcointalk.org/index.php?topic=5517607
 
 <b>-tames</b>		filename with tames. If file not found, software generates tames (option "-max" is required) and saves them to the file. If the file is found, software loads tames to speedup solving. 
 
+<b>--glv</b>		enable secp256k1 GLV endomorphism mode (tracks 2D distances and uses phi(P) jumps).
+
+<b>--no-glv</b>		disable GLV mode (default).
+
 When public key is solved, software displays it and also writes it to "RESULTS.TXT" file. 
+
+GLV mode reduces the average scalar bit length of each walk step by splitting k into (k1, k2), but it increases bookkeeping (two coordinates per distance) and slightly increases DP storage per entry. Use it when the extra memory and preprocessing overheads are acceptable for your setup.
 
 Sample command line for puzzle #85:
 

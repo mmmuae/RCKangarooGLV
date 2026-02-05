@@ -45,6 +45,7 @@ volatile int PntIndex;
 TFastBase db;
 EcPoint gPntToSolve;
 EcInt gPrivKey;
+EcPoint gPhiG;
 
 volatile u64 TotalOps;
 u32 TotalSolved;
@@ -76,11 +77,14 @@ char gTamesFileName[1024];
 double gMax;
 bool gGenMode; //tames generation mode
 bool gIsOpsLimit;
+bool gGlvMode;
 
 // Gap tracking helpers
 struct DistanceEntry
 {
-        EcInt dist;
+        EcInt k1;
+        EcInt k2;
+        EcInt scalar;
         int type;
 };
 
@@ -90,10 +94,10 @@ struct DistanceEntryLess
         {
                 for (int i = 4; i >= 0; --i)
                 {
-                        if (a.dist.data[i] != b.dist.data[i])
-                                return a.dist.data[i] < b.dist.data[i];
+                        if (a.scalar.data[i] != b.scalar.data[i])
+                                return a.scalar.data[i] < b.scalar.data[i];
                 }
-                return a.type < b.type;
+        return a.type < b.type;
         }
 };
 
@@ -106,7 +110,8 @@ bool gHasGapPair;
 
 struct DpMeta
 {
-        EcInt dist;
+        EcInt k1;
+        EcInt k2;
         int type;
 };
 
@@ -126,13 +131,13 @@ static void InitDpMetaQueue()
         gDpMetaTail.store(0, std::memory_order_release);
 }
 
-static bool EnqueueDpMeta(const EcInt& dist, int type)
+static bool EnqueueDpMeta(const EcInt& k1, const EcInt& k2, int type)
 {
         size_t head = gDpMetaHead.load(std::memory_order_relaxed);
         size_t next = (head + 1) & (kDpMetaQueueSize - 1);
         if (next == gDpMetaTail.load(std::memory_order_acquire))
                 return false;
-        gDpMetaQueue[head] = DpMeta{dist, type};
+        gDpMetaQueue[head] = DpMeta{k1, k2, type};
         gDpMetaHead.store(next, std::memory_order_release);
         return true;
 }
@@ -162,16 +167,25 @@ static int GetBitLength(const EcInt& val)
         return 0;
 }
 
-// Deserialize 22-byte DP distance into EcInt with sign extension if needed
-static EcInt DeserializeDistance(const u8* dist)
+// Deserialize 16-byte DP distance into EcInt with sign extension if needed
+static EcInt DeserializeDistance128(const u8* dist)
 {
         EcInt res;
-        memcpy(res.data, dist, 22);
-        // Sign-extend if negative marker is present
-        if (dist[21] == 0xFF)
-                memset(((u8*)res.data) + 22, 0xFF, 18);
-        else
-                memset(((u8*)res.data) + 22, 0, 18);
+        memset(res.data, 0, sizeof(res.data));
+        memcpy(res.data, dist, 16);
+        if (dist[15] & 0x80)
+                memset(((u8*)res.data) + 16, 0xFF, 24);
+        return res;
+}
+
+// Deserialize 32-byte DP distance into EcInt with sign extension if needed
+static EcInt DeserializeDistance256(const u8* dist)
+{
+        EcInt res;
+        memset(res.data, 0, sizeof(res.data));
+        memcpy(res.data, dist, 32);
+        if (dist[31] & 0x80)
+                memset(((u8*)res.data) + 32, 0xFF, 8);
         return res;
 }
 
@@ -192,6 +206,30 @@ static EcInt AbsDistance(const EcInt& a, const EcInt& b)
                 gap.Sub(right);
         }
         return gap;
+}
+
+static EcInt CombineScalarDistance(const EcInt& k1, const EcInt& k2)
+{
+        if (!gGlvMode)
+                return k1;
+        EcInt t1 = k1;
+        EcInt t2 = k2;
+        return ec.CombineScalar(t1, t2);
+}
+
+static EcPoint CombineJumpPoint(EcInt& k1, EcInt& k2)
+{
+        if (!gGlvMode)
+                return ec.MultiplyG(k1);
+
+        if (k1.IsZero())
+                return ec.Multiply(gPhiG, k2);
+        if (k2.IsZero())
+                return ec.MultiplyG(k1);
+
+        EcPoint p1 = ec.MultiplyG(k1);
+        EcPoint p2 = ec.Multiply(gPhiG, k2);
+        return ec.AddPoints(p1, p2);
 }
 
 // Normalize a candidate key so it always falls inside the configured search range
@@ -364,8 +402,8 @@ static EcInt EstimateKeyFromPair(const DistanceEntry& a, const DistanceEntry& b)
 
         if (aIsTame || bIsTame)
         {
-                        EcInt tameDist = aIsTame ? a.dist : b.dist;
-                        EcInt wildDist = aIsTame ? b.dist : a.dist;
+                        EcInt tameDist = aIsTame ? a.scalar : b.scalar;
+                        EcInt wildDist = aIsTame ? b.scalar : a.scalar;
 
                         if (EvaluateTameWild(tameDist, wildDist, false))
                                 return bestKey;
@@ -373,9 +411,9 @@ static EcInt EstimateKeyFromPair(const DistanceEntry& a, const DistanceEntry& b)
         }
         else
         {
-                        if (EvaluateWildPair(a.dist, b.dist, false))
+                        if (EvaluateWildPair(a.scalar, b.scalar, false))
                                 return bestKey;
-                        EvaluateWildPair(a.dist, b.dist, true);
+                        EvaluateWildPair(a.scalar, b.scalar, true);
         }
 
         if (!hasBest)
@@ -388,7 +426,7 @@ static EcInt EstimateKeyFromPair(const DistanceEntry& a, const DistanceEntry& b)
 
 static void UpdateGlobalGap(const DistanceEntry& distA, const DistanceEntry& distB)
 {
-        EcInt gap = AbsDistance(distA.dist, distB.dist);
+        EcInt gap = AbsDistance(distA.scalar, distB.scalar);
         std::lock_guard<std::mutex> lock(gGapMutex);
         if (!gHasLowestGap || gap.IsLessThanU(gLowestGap))
         {
@@ -432,7 +470,7 @@ static void ProcessDpMeta(const DpMeta& meta)
         else if (meta.type == WILD2)
                 gWild2Count.fetch_add(1, std::memory_order_relaxed);
 
-        DistanceEntry entry{meta.dist, meta.type};
+        DistanceEntry entry{meta.k1, meta.k2, CombineScalarDistance(meta.k1, meta.k2), meta.type};
         if (meta.type == TAME)
         {
                 gTameDistances.insert(entry);
@@ -486,7 +524,8 @@ static void StopDpMetaConsumer()
 struct DBRec
 {
 	u8 x[12];
-	u8 d[22];
+	u8 d1[16];
+	u8 d2[16];
 	u8 type; //0 - tame, 1 - wild1, 2 - wild2
 };
 #pragma pack(pop)
@@ -576,8 +615,10 @@ void AddPointsToList(u32* data, int pnt_cnt, u64 ops_cnt)
 	csAddPoints.Leave();
 }
 
-bool Collision_SOTA(EcPoint& pnt, EcInt t, int TameType, EcInt w, int WildType, bool IsNeg)
+bool Collision_SOTA(EcPoint& pnt, EcInt t1, EcInt t2, int TameType, EcInt w1, EcInt w2, int WildType, bool IsNeg)
 {
+	EcInt t = CombineScalarDistance(t1, t2);
+	EcInt w = CombineScalarDistance(w1, w2);
 	if (IsNeg)
 		t.Neg();
 	if (TameType == TAME)
@@ -635,13 +676,25 @@ void CheckNewPoints()
                 DBRec nrec;
                 u8* p = pPntList2 + i * GPU_DP_SIZE;
                 memcpy(nrec.x, p, 12);
-                memcpy(nrec.d, p + 16, 22);
-                nrec.type = gGenMode ? TAME : p[40];
+                memcpy(nrec.d1, p + 16, 16);
+                memcpy(nrec.d2, p + 32, 16);
+                nrec.type = gGenMode ? TAME : p[48];
 
-                EcInt fullDist = DeserializeDistance(nrec.d);
+                EcInt k1;
+                EcInt k2;
+                if (gGlvMode)
+                {
+                        k1 = DeserializeDistance128(nrec.d1);
+                        k2 = DeserializeDistance128(nrec.d2);
+                }
+                else
+                {
+                        k1 = DeserializeDistance256(p + 16);
+                        k2.SetZero();
+                }
 
                 if (!gGenMode)
-                        EnqueueDpMeta(fullDist, nrec.type);
+                        EnqueueDpMeta(k1, k2, nrec.type);
 
                 DBRec* pref = (DBRec*)db.FindOrAddDataBlock((u8*)&nrec);
                 if (gGenMode)
@@ -660,35 +713,50 @@ void CheckNewPoints()
 					continue;
 
 				//if it's wild, we can find the key from the same type if distances are different
-				if (*(u64*)pref->d == *(u64*)nrec.d)
+				if (!memcmp(pref->d1, nrec.d1, sizeof(nrec.d1)) && !memcmp(pref->d2, nrec.d2, sizeof(nrec.d2)))
 					continue;
 				//else
 				//	ToLog("key found by same wild");
 			}
 
-			EcInt w, t;
+			EcInt w1, w2, t1, t2;
 			int TameType, WildType;
 			if (pref->type != TAME)
 			{
-				memcpy(w.data, pref->d, sizeof(pref->d));
-				if (pref->d[21] == 0xFF) memset(((u8*)w.data) + 22, 0xFF, 18);
-				memcpy(t.data, nrec.d, sizeof(nrec.d));
-				if (nrec.d[21] == 0xFF) memset(((u8*)t.data) + 22, 0xFF, 18);
+				w1 = DeserializeDistance128(pref->d1);
+				w2 = DeserializeDistance128(pref->d2);
+				t1 = DeserializeDistance128(nrec.d1);
+				t2 = DeserializeDistance128(nrec.d2);
+				if (!gGlvMode)
+				{
+					w1 = DeserializeDistance256(pref->d1);
+					w2.SetZero();
+					t1 = DeserializeDistance256(nrec.d1);
+					t2.SetZero();
+				}
 				TameType = nrec.type;
 				WildType = pref->type;
 			}
 			else
 			{
-				memcpy(w.data, nrec.d, sizeof(nrec.d));
-				if (nrec.d[21] == 0xFF) memset(((u8*)w.data) + 22, 0xFF, 18);
-				memcpy(t.data, pref->d, sizeof(pref->d));
-				if (pref->d[21] == 0xFF) memset(((u8*)t.data) + 22, 0xFF, 18);
+				w1 = DeserializeDistance128(nrec.d1);
+				w2 = DeserializeDistance128(nrec.d2);
+				t1 = DeserializeDistance128(pref->d1);
+				t2 = DeserializeDistance128(pref->d2);
+				if (!gGlvMode)
+				{
+					w1 = DeserializeDistance256(nrec.d1);
+					w2.SetZero();
+					t1 = DeserializeDistance256(pref->d1);
+					t2.SetZero();
+				}
 				TameType = TAME;
 				WildType = nrec.type;
 			}
 
 			// Verify if this is a collision (matching X coordinate)
-			bool res = Collision_SOTA(gPntToSolve, t, TameType, w, WildType, false) || Collision_SOTA(gPntToSolve, t, TameType, w, WildType, true);
+			bool res = Collision_SOTA(gPntToSolve, t1, t2, TameType, w1, w2, WildType, false) ||
+                                   Collision_SOTA(gPntToSolve, t1, t2, TameType, w1, w2, WildType, true);
 			if (!res)
 			{
 				bool w12 = ((pref->type == WILD1) && (nrec.type == WILD2)) || ((pref->type == WILD2) && (nrec.type == WILD1));
@@ -830,6 +898,14 @@ bool SolvePoint(EcPoint PntToSolve, EcInt& RangeWidth, int RangeBits, int DP, Ec
 
         int RangeWidthBits = GetBitLength(RangeWidth);
 	printf("\r\nSolving point: Range %d bits (width bits %d), DP %d, start...\r\n", RangeBits, RangeWidthBits, DP);
+
+        if (gGlvMode)
+        {
+                EcInt one;
+                one.Set(1);
+                EcPoint base = ec.MultiplyG(one);
+                gPhiG = ec.Endomorphism(base);
+        }
         double ops = 1.15 * pow(2.0, RangeBits / 2.0);
 	double dp_val = (double)(1ull << DP);
 	double ram = (32 + 4 + 4) * ops / dp_val; //+4 for grow allocation and memory fragmentation
@@ -903,9 +979,13 @@ bool SolvePoint(EcPoint PntToSolve, EcInt& RangeWidth, int RangeBits, int DP, Ec
         gTameDistances.clear();
         gWild1Distances.clear();
         gWild2Distances.clear();
-        gBestDistanceA.dist.SetZero();
+        gBestDistanceA.k1.SetZero();
+        gBestDistanceA.k2.SetZero();
+        gBestDistanceA.scalar.SetZero();
         gBestDistanceA.type = 0;
-        gBestDistanceB.dist.SetZero();
+        gBestDistanceB.k1.SetZero();
+        gBestDistanceB.k2.SetZero();
+        gBestDistanceB.scalar.SetZero();
         gBestDistanceB.type = 0;
 //prepare jumps
         EcInt minjump, t;
@@ -913,33 +993,63 @@ bool SolvePoint(EcPoint PntToSolve, EcInt& RangeWidth, int RangeBits, int DP, Ec
         minjump.ShiftLeft(RangeBits / 2 + 3);
 	for (int i = 0; i < JMP_CNT; i++)
 	{
-		EcJumps1[i].dist = minjump;
+		EcInt scalar = minjump;
 		t.RndMax(minjump);
-		EcJumps1[i].dist.Add(t);
-		EcJumps1[i].dist.data[0] &= 0xFFFFFFFFFFFFFFFE; //must be even
-		EcJumps1[i].p = ec.MultiplyG(EcJumps1[i].dist);
+		scalar.Add(t);
+		scalar.data[0] &= 0xFFFFFFFFFFFFFFFE; //must be even
+		if (gGlvMode)
+		{
+			ec.GlvSplitScalar(scalar, EcJumps1[i].dist1, EcJumps1[i].dist2);
+			EcJumps1[i].p = CombineJumpPoint(EcJumps1[i].dist1, EcJumps1[i].dist2);
+		}
+		else
+		{
+			EcJumps1[i].dist1 = scalar;
+			EcJumps1[i].dist2.SetZero();
+			EcJumps1[i].p = ec.MultiplyG(EcJumps1[i].dist1);
+		}
 	}
 
         minjump.Set(1);
         minjump.ShiftLeft(RangeBits - 10); //large jumps for L1S2 loops. Must be almost RANGE_BITS
 	for (int i = 0; i < JMP_CNT; i++)
 	{
-		EcJumps2[i].dist = minjump;
+		EcInt scalar = minjump;
 		t.RndMax(minjump);
-		EcJumps2[i].dist.Add(t);
-		EcJumps2[i].dist.data[0] &= 0xFFFFFFFFFFFFFFFE; //must be even
-		EcJumps2[i].p = ec.MultiplyG(EcJumps2[i].dist);
+		scalar.Add(t);
+		scalar.data[0] &= 0xFFFFFFFFFFFFFFFE; //must be even
+		if (gGlvMode)
+		{
+			ec.GlvSplitScalar(scalar, EcJumps2[i].dist1, EcJumps2[i].dist2);
+			EcJumps2[i].p = CombineJumpPoint(EcJumps2[i].dist1, EcJumps2[i].dist2);
+		}
+		else
+		{
+			EcJumps2[i].dist1 = scalar;
+			EcJumps2[i].dist2.SetZero();
+			EcJumps2[i].p = ec.MultiplyG(EcJumps2[i].dist1);
+		}
 	}
 
         minjump.Set(1);
         minjump.ShiftLeft(RangeBits - 10 - 2); //large jumps for loops >2
 	for (int i = 0; i < JMP_CNT; i++)
 	{
-		EcJumps3[i].dist = minjump;
+		EcInt scalar = minjump;
 		t.RndMax(minjump);
-		EcJumps3[i].dist.Add(t);
-		EcJumps3[i].dist.data[0] &= 0xFFFFFFFFFFFFFFFE; //must be even
-		EcJumps3[i].p = ec.MultiplyG(EcJumps3[i].dist);
+		scalar.Add(t);
+		scalar.data[0] &= 0xFFFFFFFFFFFFFFFE; //must be even
+		if (gGlvMode)
+		{
+			ec.GlvSplitScalar(scalar, EcJumps3[i].dist1, EcJumps3[i].dist2);
+			EcJumps3[i].p = CombineJumpPoint(EcJumps3[i].dist1, EcJumps3[i].dist2);
+		}
+		else
+		{
+			EcJumps3[i].dist1 = scalar;
+			EcJumps3[i].dist2.SetZero();
+			EcJumps3[i].p = ec.MultiplyG(EcJumps3[i].dist1);
+		}
 	}
 	SetRndSeed(GetTickCount64());
 
@@ -1065,6 +1175,8 @@ bool ParseCommandLine(int argc, char* argv[])
 			printf("  --pubkey <hex>              Public key (hex)\r\n");
 			printf("  -tames <file>               Tames filename\r\n");
 			printf("  -m <value>                  Max ops limit (for tames generation)\r\n");
+			printf("  --glv                       Enable GLV endomorphism mode\r\n");
+			printf("  --no-glv                    Disable GLV endomorphism mode (default)\r\n");
 			printf("  -h, --help                  Show this help\r\n");
 			return false;
 		}
@@ -1233,6 +1345,16 @@ bool ParseCommandLine(int argc, char* argv[])
 			gMax = val;
 		}
 		else
+		if (strcmp(argument, "--glv") == 0)
+		{
+			gGlvMode = true;
+		}
+		else
+		if (strcmp(argument, "--no-glv") == 0)
+		{
+			gGlvMode = false;
+		}
+		else
 		{
 			printf("error: unknown option %s\r\n", argument);
 			return false;
@@ -1312,6 +1434,7 @@ int main(int argc, char* argv[])
         gMax = 0.0;
         gGenMode = false;
         gIsOpsLimit = false;
+        gGlvMode = false;
 	memset(gGPUs_Mask, 1, sizeof(gGPUs_Mask));
 	if (!ParseCommandLine(argc, argv))
 		return 0;

@@ -15,6 +15,20 @@ void CallGpuKernelGen(TKparams Kparams);
 void CallGpuKernelABC(TKparams Kparams);
 void AddPointsToList(u32* data, int cnt, u64 ops_cnt);
 extern bool gGenMode; //tames generation mode
+extern bool gGlvMode;
+
+static void StoreDistance(u64* dst, const EcInt& k1, const EcInt& k2, bool glv_mode)
+{
+	if (glv_mode)
+	{
+		memcpy(dst, k1.data, 16);
+		memcpy(dst + 2, k2.data, 16);
+	}
+	else
+	{
+		memcpy(dst, k1.data, 32);
+	}
+}
 
 int RCGpuKang::CalcKangCnt()
 {
@@ -56,6 +70,7 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _RangeBits, int _DP, EcInt _Ran
 	Kparams.KernelB_LDS_Size = 64 * JMP_CNT;
 	Kparams.KernelC_LDS_Size = 96 * JMP_CNT;
 	Kparams.IsGenMode = gGenMode;
+	Kparams.IsGlvMode = gGlvMode;
 
 //allocate gpu mem
 	u64 size;
@@ -200,7 +215,8 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _RangeBits, int _DP, EcInt _Ran
 	{
 		memcpy(buf + i * 12, EcJumps1[i].p.x.data, 32);
 		memcpy(buf + i * 12 + 4, EcJumps1[i].p.y.data, 32);
-		memcpy(buf + i * 12 + 8, EcJumps1[i].dist.data, 32);
+		memcpy(buf + i * 12 + 8, EcJumps1[i].dist1.data, 16);
+		memcpy(buf + i * 12 + 10, EcJumps1[i].dist2.data, 16);
 	}
 	err = cudaMemcpy(Kparams.Jumps1, buf, JMP_CNT * 96, cudaMemcpyHostToDevice);
 	if (err != cudaSuccess)
@@ -218,7 +234,8 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _RangeBits, int _DP, EcInt _Ran
 		memcpy(jmp2_table + i * 8, EcJumps2[i].p.x.data, 32);
 		memcpy(buf + i * 12 + 4, EcJumps2[i].p.y.data, 32);
 		memcpy(jmp2_table + i * 8 + 4, EcJumps2[i].p.y.data, 32);
-		memcpy(buf + i * 12 + 8, EcJumps2[i].dist.data, 32);
+		memcpy(buf + i * 12 + 8, EcJumps2[i].dist1.data, 16);
+		memcpy(buf + i * 12 + 10, EcJumps2[i].dist2.data, 16);
 	}
 	err = cudaMemcpy(Kparams.Jumps2, buf, JMP_CNT * 96, cudaMemcpyHostToDevice);
 	if (err != cudaSuccess)
@@ -242,7 +259,8 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _RangeBits, int _DP, EcInt _Ran
 	{
 		memcpy(buf + i * 12, EcJumps3[i].p.x.data, 32);
 		memcpy(buf + i * 12 + 4, EcJumps3[i].p.y.data, 32);
-		memcpy(buf + i * 12 + 8, EcJumps3[i].dist.data, 32);
+		memcpy(buf + i * 12 + 8, EcJumps3[i].dist1.data, 16);
+		memcpy(buf + i * 12 + 10, EcJumps3[i].dist2.data, 16);
 	}
 	err = cudaMemcpy(Kparams.Jumps3, buf, JMP_CNT * 96, cudaMemcpyHostToDevice);
 	if (err != cudaSuccess)
@@ -296,7 +314,16 @@ void RCGpuKang::GenerateRndDistances()
                         d.RndBits(RangeBits - 1);
                         d.data[0] &= 0xFFFFFFFFFFFFFFFE; //must be even
                 }
-                memcpy(RndPnts[i].priv, d.data, 24);
+                if (gGlvMode)
+                {
+                        EcInt k1, k2;
+                        ec.GlvSplitScalar(d, k1, k2);
+                        StoreDistance(RndPnts[i].priv, k1, k2, true);
+                }
+                else
+                {
+                        StoreDistance(RndPnts[i].priv, d, d, false);
+                }
         }
 }
 
@@ -398,23 +425,43 @@ int RCGpuKang::Dbg_CheckKangs()
 	u64* kangs = (u64*)malloc(kang_size);
 	cudaError_t err = cudaMemcpy(kangs, Kparams.Kangs, kang_size, cudaMemcpyDeviceToHost);
 	int res = 0;
+	EcPoint phiG;
+	if (gGlvMode)
+	{
+		EcInt one;
+		one.Set(1);
+		phiG = ec.Endomorphism(ec.MultiplyG(one));
+	}
 	for (int i = 0; i < KangCnt; i++)
 	{
 		EcPoint Pnt, p;
 		Pnt.LoadFromBuffer64((u8*)&kangs[i * 12 + 0]);
-		EcInt dist;
-		dist.Set(0);
-		memcpy(dist.data, &kangs[i * 12 + 8], 24);
-		bool neg = false;
-		if (dist.data[2] >> 63)
+		EcInt k1, k2;
+		k1.SetZero();
+		k2.SetZero();
+		memcpy(k1.data, &kangs[i * 12 + 8], 16);
+		if (gGlvMode)
 		{
-			neg = true;
-			memset(((u8*)dist.data) + 24, 0xFF, 16);
-			dist.Neg();
+			memcpy(k2.data, &kangs[i * 12 + 10], 16);
+			if (((u8*)k1.data)[15] & 0x80)
+				memset(((u8*)k1.data) + 16, 0xFF, 24);
+			if (((u8*)k2.data)[15] & 0x80)
+				memset(((u8*)k2.data) + 16, 0xFF, 24);
+			EcInt k1_abs = k1;
+			bool neg1 = (k1_abs.data[4] >> 63) != 0;
+			if (neg1)
+				k1_abs.Neg();
+			EcPoint p1 = ec.MultiplyG_Fast(k1_abs);
+			if (neg1)
+				p1.y.NegModP();
+			EcPoint p2 = ec.Multiply(phiG, k2);
+			p = ec.AddPoints(p1, p2);
 		}
-		p = ec.MultiplyG_Fast(dist);
-		if (neg)
-			p.y.NegModP();
+		else
+		{
+			memcpy(k1.data, &kangs[i * 12 + 8], 32);
+			p = ec.MultiplyG_Fast(k1);
+		}
 		if (i < KangCnt / 3)
 			p = p;
 		else
