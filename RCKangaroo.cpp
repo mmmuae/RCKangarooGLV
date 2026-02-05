@@ -917,12 +917,17 @@ bool SolvePoint(EcPoint PntToSolve, EcInt& RangeWidth, int RangeBits, int DP, Ec
                 EcPoint base = ec.MultiplyG(one);
                 gPhiG = ec.Endomorphism(base);
         }
-        double ops = 1.15 * pow(2.0, RangeBits / 2.0);
+        double base_ops = 1.15 * pow(2.0, RangeBits / 2.0);
+        double ops = gGlvMode ? (base_ops / 6.0) : base_ops;
 	double dp_val = (double)(1ull << DP);
 	double ram = (32 + 4 + 4) * ops / dp_val; //+4 for grow allocation and memory fragmentation
 	ram += sizeof(TListRec) * 256 * 256 * 256; //3byte-prefix table
 	ram /= (1024 * 1024 * 1024); //GB
 	printf("SOTA method, estimated ops: 2^%.3f, RAM for DPs: %.3f GB. DP and GPU overheads not included!\r\n", log2(ops), ram);
+	if (gGlvMode)
+	{
+		printf("GLV+negation collapses 6 twins into one class: base ops 2^%.3f, effective speedup ~%.2fx\r\n", log2(base_ops), base_ops / ops);
+	}
 	gIsOpsLimit = false;
 	double MaxTotalOps = 0.0;
 	if (gMax > 0)
