@@ -13,7 +13,8 @@
 struct EcJMP
 {
 	EcPoint p;
-	EcInt dist;
+	EcInt dist1;
+	EcInt dist2;
 };
 
 //96bytes size

@@ -69,6 +69,26 @@
   subc_cc_64((res)[1], (res)[1], (val)[1]); \
   subc_64((res)[2], (res)[2], (val)[2]); }
 
+#define Add128to128(res, val) { \
+  add_cc_64((res)[0], (res)[0], (val)[0]); \
+  addc_64((res)[1], (res)[1], (val)[1]); }
+
+#define Sub128from128(res, val) { \
+  sub_cc_64((res)[0], (res)[0], (val)[0]); \
+  subc_64((res)[1], (res)[1], (val)[1]); }
+
+#define Add256to256(res, val) { \
+  add_cc_64((res)[0], (res)[0], (val)[0]); \
+  addc_cc_64((res)[1], (res)[1], (val)[1]); \
+  addc_cc_64((res)[2], (res)[2], (val)[2]); \
+  addc_64((res)[3], (res)[3], (val)[3]); }
+
+#define Sub256from256(res, val) { \
+  sub_cc_64((res)[0], (res)[0], (val)[0]); \
+  subc_cc_64((res)[1], (res)[1], (val)[1]); \
+  subc_cc_64((res)[2], (res)[2], (val)[2]); \
+  subc_64((res)[3], (res)[3], (val)[3]); }
+
 #define Copy_int4_x2(dst, src) {\
   ((int4*)(dst))[0] = ((int4*)(src))[0]; \
   ((int4*)(dst))[1] = ((int4*)(src))[1]; }
@@ -627,4 +647,3 @@ __device__ __forceinline__ void InvModP(u32* res)
 	while ((int)res[8] > 0)
 		sub_288_P(res);
 }
-
