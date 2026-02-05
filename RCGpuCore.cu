@@ -498,17 +498,15 @@ __device__ __forceinline__ void BuildDP(const TKparams& Kparams, int kang_ind, u
 	DPs[12] = 3 * kang_ind / Kparams.KangCnt; //kang type
 }
 
-__device__ __forceinline__ bool ProcessJumpDistance(u32 step_ind, u32 d_cur, u64* d, u32 kang_ind, u64* jmp1_d, u64* jmp2_d, const TKparams& Kparams, u64* table, u32* cur_ind, u8 iter)
+template <bool kGlvMode>
+struct JumpDistanceOps;
+
+template <>
+struct JumpDistanceOps<true>
 {
-	u64* jmp_d = (d_cur & JMP2_FLAG) ? jmp2_d : jmp1_d;
-
-	__align__(16) u64 jmp[4];
-	((int4*)(jmp))[0] = ((int4*)(jmp_d + 4 * (d_cur & JMP_MASK)))[0];
-	((int4*)(jmp))[1] = ((int4*)(jmp_d + 4 * (d_cur & JMP_MASK) + 2))[0];
-
-	if (Kparams.IsGlvMode)
+	__device__ __forceinline__ static void Apply(u64* d, const u64* jmp, u32 flags)
 	{
-		if (d_cur & INV_FLAG)
+		if (flags & INV_FLAG)
 		{
 			Sub128from128(d, jmp);
 			Sub128from128(d + 2, jmp + 2);
@@ -519,9 +517,14 @@ __device__ __forceinline__ bool ProcessJumpDistance(u32 step_ind, u32 d_cur, u64
 			Add128to128(d + 2, jmp + 2);
 		}
 	}
-	else
+};
+
+template <>
+struct JumpDistanceOps<false>
+{
+	__device__ __forceinline__ static void Apply(u64* d, const u64* jmp, u32 flags)
 	{
-		if (d_cur & INV_FLAG)
+		if (flags & INV_FLAG)
 		{
 			Sub256from256(d, jmp);
 		}
@@ -530,6 +533,18 @@ __device__ __forceinline__ bool ProcessJumpDistance(u32 step_ind, u32 d_cur, u64
 			Add256to256(d, jmp);
 		}
 	}
+};
+
+template <bool kGlvMode>
+__device__ __forceinline__ bool ProcessJumpDistance(u32 step_ind, u32 d_cur, u64* d, u32 kang_ind, u64* jmp1_d, u64* jmp2_d, const TKparams& Kparams, u64* table, u32* cur_ind, u8 iter)
+{
+	u64* jmp_d = (d_cur & JMP2_FLAG) ? jmp2_d : jmp1_d;
+
+	__align__(16) u64 jmp[4];
+	((int4*)(jmp))[0] = ((int4*)(jmp_d + 4 * (d_cur & JMP_MASK)))[0];
+	((int4*)(jmp))[1] = ((int4*)(jmp_d + 4 * (d_cur & JMP_MASK) + 2))[0];
+
+	JumpDistanceOps<kGlvMode>::Apply(d, jmp, d_cur);
 
 	//check in table
 	int found_ind = iter + MD_LEN - 4;
@@ -576,9 +591,9 @@ __device__ __forceinline__ bool ProcessJumpDistance(u32 step_ind, u32 d_cur, u64
 	u16 cur_dA = cur_dAB & 0xFFFF; \
 	u16 cur_dB = cur_dAB >> 16; \
 	if (!LoopedA) \
-		LoopedA = ProcessJumpDistance(step_ind, cur_dA, dA, kang_ind, jmp1_d, jmp2_d, Kparams, RegsA, &cur_indA, iter); \
+		LoopedA = ProcessJumpDistance<kGlvMode>(step_ind, cur_dA, dA, kang_ind, jmp1_d, jmp2_d, Kparams, RegsA, &cur_indA, iter); \
 	if (!LoopedB) \
-		LoopedB = ProcessJumpDistance(step_ind, cur_dB, dB, kang_ind + 1, jmp1_d, jmp2_d, Kparams, RegsB, &cur_indB, iter); \
+		LoopedB = ProcessJumpDistance<kGlvMode>(step_ind, cur_dB, dB, kang_ind + 1, jmp1_d, jmp2_d, Kparams, RegsB, &cur_indB, iter); \
 	jlist += BLOCK_SIZE * PNT_GROUP_CNT / 2; \
 	step_ind++; \
 }
@@ -591,8 +606,8 @@ __device__ __forceinline__ bool ProcessJumpDistance(u32 step_ind, u32 d_cur, u64
 // Since we lose kangs gradually, for a year we lose 0.19/2 = 0.1% of speed, so you should catch L1S12 only if you are going to solve same point for decades.
 // Or you can check all kangs for L1S12 on CPU once a day and restart looped kangs.
 // Level2 loops are very rare and they have even size too so they will be handled by the same code. We don't know what loop level we catch so we use JmpTable3 for escaping.
-extern "C" __launch_bounds__(BLOCK_SIZE, 1)
-__global__ void KernelB(const TKparams Kparams)
+template <bool kGlvMode>
+__device__ __forceinline__ void KernelBBody(const TKparams& Kparams)
 {
 	u64* jmp1_d = LDS; //16KB, 256bit jumps
 	u64* jmp2_d = LDS + 4 * JMP_CNT; //16KB, 256bit jumps
@@ -690,9 +705,21 @@ __global__ void KernelB(const TKparams Kparams)
 	}
 }
 
-//this kernel performes single jump3 for looped kangs
 extern "C" __launch_bounds__(BLOCK_SIZE, 1)
-__global__ void KernelC(const TKparams Kparams)
+__global__ void KernelB_Glv(const TKparams Kparams)
+{
+	KernelBBody<true>(Kparams);
+}
+
+extern "C" __launch_bounds__(BLOCK_SIZE, 1)
+__global__ void KernelB_NoGlv(const TKparams Kparams)
+{
+	KernelBBody<false>(Kparams);
+}
+
+//this kernel performes single jump3 for looped kangs
+template <bool kGlvMode>
+__device__ __forceinline__ void KernelCBody(const TKparams& Kparams)
 {
 	u64* jmp3_table = LDS; //48KB
 
@@ -775,7 +802,7 @@ __global__ void KernelC(const TKparams Kparams)
 		d[1] = Kparams.Kangs[kang_ind * 12 + 9];
 		d[2] = Kparams.Kangs[kang_ind * 12 + 10];
 		d[3] = Kparams.Kangs[kang_ind * 12 + 11];
-		if (Kparams.IsGlvMode)
+		if (kGlvMode)
 		{
 			if (inv_flag)
 			{
@@ -788,17 +815,17 @@ __global__ void KernelC(const TKparams Kparams)
 				Add128to128(d + 2, jmp3_table + 12 * jmp_ind + 10);
 			}
 		}
-	else
-	{
-		if (inv_flag)
-		{
-			Sub256from256(d, jmp3_table + 12 * jmp_ind + 8);
-		}
 		else
 		{
-			Add256to256(d, jmp3_table + 12 * jmp_ind + 8);
+			if (inv_flag)
+			{
+				Sub256from256(d, jmp3_table + 12 * jmp_ind + 8);
+			}
+			else
+			{
+				Add256to256(d, jmp3_table + 12 * jmp_ind + 8);
+			}
 		}
-	}
 		Kparams.Kangs[kang_ind * 12 + 8] = d[0];
 		Kparams.Kangs[kang_ind * 12 + 9] = d[1];
 		Kparams.Kangs[kang_ind * 12 + 10] = d[2];
@@ -810,6 +837,18 @@ __global__ void KernelC(const TKparams Kparams)
 		atomicAnd(&((u64*)Kparams.L1S2)[block_ind * BLOCK_SIZE + thr_ind], ~(1ull << gr_ind));
 #endif
 	}
+}
+
+extern "C" __launch_bounds__(BLOCK_SIZE, 1)
+__global__ void KernelC_Glv(const TKparams Kparams)
+{
+	KernelCBody<true>(Kparams);
+}
+
+extern "C" __launch_bounds__(BLOCK_SIZE, 1)
+__global__ void KernelC_NoGlv(const TKparams Kparams)
+{
+	KernelCBody<false>(Kparams);
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1051,8 +1090,16 @@ __global__ void KernelGen(const TKparams Kparams)
 void CallGpuKernelABC(TKparams Kparams)
 {
 	KernelA <<< Kparams.BlockCnt, Kparams.BlockSize, Kparams.KernelA_LDS_Size >>> (Kparams);
-	KernelB <<< Kparams.BlockCnt, Kparams.BlockSize, Kparams.KernelB_LDS_Size >>> (Kparams);
-	KernelC <<< Kparams.BlockCnt, Kparams.BlockSize, Kparams.KernelC_LDS_Size >>> (Kparams);
+	if (Kparams.IsGlvMode)
+	{
+		KernelB_Glv <<< Kparams.BlockCnt, Kparams.BlockSize, Kparams.KernelB_LDS_Size >>> (Kparams);
+		KernelC_Glv <<< Kparams.BlockCnt, Kparams.BlockSize, Kparams.KernelC_LDS_Size >>> (Kparams);
+	}
+	else
+	{
+		KernelB_NoGlv <<< Kparams.BlockCnt, Kparams.BlockSize, Kparams.KernelB_LDS_Size >>> (Kparams);
+		KernelC_NoGlv <<< Kparams.BlockCnt, Kparams.BlockSize, Kparams.KernelC_LDS_Size >>> (Kparams);
+	}
 }
 
 void CallGpuKernelGen(TKparams Kparams)
@@ -1065,10 +1112,16 @@ cudaError_t cuSetGpuParams(TKparams Kparams, u64* _jmp2_table)
 	cudaError_t err = cudaFuncSetAttribute(KernelA, cudaFuncAttributeMaxDynamicSharedMemorySize, Kparams.KernelA_LDS_Size);
 	if (err != cudaSuccess)
 		return err;
-	err = cudaFuncSetAttribute(KernelB, cudaFuncAttributeMaxDynamicSharedMemorySize, Kparams.KernelB_LDS_Size);
+	err = cudaFuncSetAttribute(KernelB_Glv, cudaFuncAttributeMaxDynamicSharedMemorySize, Kparams.KernelB_LDS_Size);
 	if (err != cudaSuccess)
 		return err;
-	err = cudaFuncSetAttribute(KernelC, cudaFuncAttributeMaxDynamicSharedMemorySize, Kparams.KernelC_LDS_Size);
+	err = cudaFuncSetAttribute(KernelB_NoGlv, cudaFuncAttributeMaxDynamicSharedMemorySize, Kparams.KernelB_LDS_Size);
+	if (err != cudaSuccess)
+		return err;
+	err = cudaFuncSetAttribute(KernelC_Glv, cudaFuncAttributeMaxDynamicSharedMemorySize, Kparams.KernelC_LDS_Size);
+	if (err != cudaSuccess)
+		return err;
+	err = cudaFuncSetAttribute(KernelC_NoGlv, cudaFuncAttributeMaxDynamicSharedMemorySize, Kparams.KernelC_LDS_Size);
 	if (err != cudaSuccess)
 		return err;
 	err = cudaMemcpyToSymbol(jmp2_table, _jmp2_table, JMP_CNT * 64);

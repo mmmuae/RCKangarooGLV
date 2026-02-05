@@ -941,6 +941,7 @@ bool SolvePoint(EcPoint PntToSolve, EcInt& RangeWidth, int RangeBits, int DP, Ec
 	u64 dp_mask = ~((1ull << (64 - DP)) - 1);
 	printf("Number of CPU thread: 0\r\n");
 	printf("Range width: 2^%d\r\n", RangeBits);
+	printf("GLV endomorphism: %s\r\n", gGlvMode ? "enabled (2x128-bit distances)" : "disabled (256-bit distances)");
 	printf("Number of kangaroos: 2^%.2f\r\n", log2((double)total_kangs));
 	printf("Suggested DP: %d\r\n", DP);
 	printf("Expected operations: 2^%.2f\r\n", log2(ops));
