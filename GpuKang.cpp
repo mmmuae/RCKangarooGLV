@@ -163,6 +163,15 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _RangeBits, int _DP, EcInt _Ran
 		return false;
 	}
 
+	size = (u64)KangCnt * DPTABLE_MAX_CNT * sizeof(u32);
+	total_mem += size;
+	err = cudaMalloc((void**)&Kparams.DPTag, size);
+	if (err != cudaSuccess)
+	{
+		printf("GPU %d Allocate DPTag memory failed: %s\n", CudaIndex, cudaGetErrorString(err));
+		return false;
+	}
+
 	size = mpCnt * Kparams.BlockSize * sizeof(u64);
 	total_mem += size;
 	err = cudaMalloc((void**)&Kparams.L1S2, size);
