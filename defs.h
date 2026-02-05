@@ -84,6 +84,7 @@ struct TKparams
 	u64* L2;
 	u64 DP;
 	u32* DPs_out;
+	u32 DPOutMax;
 	u64* Jumps1; //x(32b), y(32b), d(32b)
 	u64* Jumps2; //x(32b), y(32b), d(32b)
 	u64* Jumps3; //x(32b), y(32b), d(32b)
