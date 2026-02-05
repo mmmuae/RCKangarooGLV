@@ -19,6 +19,125 @@ __device__ __constant__ u64 jmp2_table[8 * JMP_CNT];
 #define LOAD_VAL_256(dst, ptr, group) { *((int4*)&(dst)[0]) = *((int4*)&(ptr)[BLOCK_SIZE * 4 * BLOCK_CNT * (group)]); *((int4*)&(dst)[2]) = *((int4*)&(ptr)[2 * BLOCK_SIZE + BLOCK_SIZE * 4 * BLOCK_CNT * (group)]); }
 #define SAVE_VAL_256(ptr, src, group) { *((int4*)&(ptr)[BLOCK_SIZE * 4 * BLOCK_CNT * (group)]) = *((int4*)&(src)[0]); *((int4*)&(ptr)[2 * BLOCK_SIZE + BLOCK_SIZE * 4 * BLOCK_CNT * (group)]) = *((int4*)&(src)[2]); }
 
+// secp256k1 endomorphism beta constants for x -> beta * x mod p
+__device__ __forceinline__ void LoadBeta(u64* out)
+{
+	out[0] = 0xc1396c28719501eeULL;
+	out[1] = 0x9cf0497512f58995ULL;
+	out[2] = 0x6e64479eac3434e9ULL;
+	out[3] = 0x7ae96a2b657c0710ULL;
+}
+
+__device__ __forceinline__ void LoadBeta2(u64* out)
+{
+	out[0] = 0x3ec693d68e6afa40ULL;
+	out[1] = 0x630fb68aed0a766aULL;
+	out[2] = 0x919bb86153cbcb16ULL;
+	out[3] = 0x851695d49a83f8efULL;
+}
+
+__device__ __forceinline__ bool LessThan256(const u64* a, const u64* b)
+{
+	for (int i = 3; i >= 0; --i)
+	{
+		if (a[i] != b[i])
+			return a[i] < b[i];
+	}
+	return false;
+}
+
+__device__ __forceinline__ void Copy256(u64* dst, const u64* src)
+{
+	dst[0] = src[0];
+	dst[1] = src[1];
+	dst[2] = src[2];
+	dst[3] = src[3];
+}
+
+__device__ __forceinline__ void Neg128(u64* val)
+{
+	sub_cc_64(val[0], 0ull, val[0]);
+	subc_64(val[1], 0ull, val[1]);
+}
+
+__device__ __forceinline__ void CanonicalizeDistanceGlv(u64* k1, u64* k2, u32 tag)
+{
+	u32 rot = tag & 0x3;
+	bool neg = (tag & 0x4) != 0;
+	u64 a[2] = {k1[0], k1[1]};
+	u64 b[2] = {k2[0], k2[1]};
+	u64 sum[2];
+
+	if (rot != 0)
+	{
+		sum[0] = a[0];
+		sum[1] = a[1];
+		Add128to128(sum, b);
+		Neg128(sum);
+		if (rot == 1)
+		{
+			a[0] = b[0];
+			a[1] = b[1];
+			b[0] = sum[0];
+			b[1] = sum[1];
+		}
+		else
+		{
+			b[0] = a[0];
+			b[1] = a[1];
+			a[0] = sum[0];
+			a[1] = sum[1];
+		}
+	}
+
+	if (neg)
+	{
+		Neg128(a);
+		Neg128(b);
+	}
+
+	k1[0] = a[0];
+	k1[1] = a[1];
+	k2[0] = b[0];
+	k2[1] = b[1];
+}
+
+__device__ __forceinline__ u32 CanonicalizePointGlv(u64* x, u64* y)
+{
+	u64 beta[4];
+	u64 beta2[4];
+	u64 x1[4];
+	u64 x2[4];
+
+	LoadBeta(beta);
+	LoadBeta2(beta2);
+
+	MulModP(x1, x, beta);
+	MulModP(x2, x, beta2);
+
+	u32 best = 0;
+	u64* best_x = x;
+	if (LessThan256(x1, best_x))
+	{
+		best = 1;
+		best_x = x1;
+	}
+	if (LessThan256(x2, best_x))
+	{
+		best = 2;
+		best_x = x2;
+	}
+
+	if (best != 0)
+		Copy256(x, best_x);
+
+	u32 neg = (y[0] & 1) ? 1u : 0u;
+	if (neg)
+		NegModP(y);
+
+	return best | (neg << 2);
+}
+
 
 extern __shared__ u64 LDS[]; 
 
@@ -164,7 +283,15 @@ __global__ void KernelA(const TKparams Kparams)
 				u32 ind = atomicAdd(Kparams.DPTable + kang_ind, 1);
 				ind = min(ind, DPTABLE_MAX_CNT - 1);
 				int4* dst = (int4*)(Kparams.DPTable + Kparams.KangCnt + (kang_ind * DPTABLE_MAX_CNT + ind) * 4);
-				dst[0] = ((int4*)x)[0];
+				u32 tag = 0;
+				u64 x_can[4];
+				u64 y_can[4];
+				Copy256(x_can, x);
+				Copy256(y_can, y);
+				if (Kparams.IsGlvMode)
+					tag = CanonicalizePointGlv(x_can, y_can);
+				dst[0] = ((int4*)x_can)[0];
+				Kparams.DPTag[kang_ind * DPTABLE_MAX_CNT + ind] = tag;
 				jmp_ind |= DP_FLAG;
 			}
 
@@ -402,7 +529,15 @@ __global__ void KernelA(const TKparams Kparams)
 				u32 ind = atomicAdd(Kparams.DPTable + kang_ind, 1);
 				ind = min(ind, DPTABLE_MAX_CNT - 1);
 				int4* dst = (int4*)(Kparams.DPTable + Kparams.KangCnt + (kang_ind * DPTABLE_MAX_CNT + ind) * 4);
-				dst[0] = ((int4*)x)[0];
+				u32 tag = 0;
+				u64 x_can[4];
+				u64 y_can[4];
+				Copy256(x_can, x);
+				Copy256(y_can, y);
+				if (Kparams.IsGlvMode)
+					tag = CanonicalizePointGlv(x_can, y_can);
+				dst[0] = ((int4*)x_can)[0];
+				Kparams.DPTag[kang_ind * DPTABLE_MAX_CNT + ind] = tag;
 				jmp_ind |= DP_FLAG;
 			}
 
@@ -489,12 +624,23 @@ __device__ __forceinline__ void BuildDP(const TKparams& Kparams, int kang_ind, u
 	if (ind >= DPTABLE_MAX_CNT)
 		return;
 	int4 rx = *(int4*)(Kparams.DPTable + Kparams.KangCnt + (kang_ind * DPTABLE_MAX_CNT + ind) * 4);
+	u32 tag = Kparams.DPTag[kang_ind * DPTABLE_MAX_CNT + ind];
+	u64 d1[2] = {d[0], d[1]};
+	u64 d2[2] = {d[2], d[3]};
+	if (Kparams.IsGlvMode)
+		CanonicalizeDistanceGlv(d1, d2, tag);
 	u32 pos = atomicAdd(Kparams.DPs_out, 1);
 	pos = min(pos, MAX_DP_CNT - 1);
 	u32* DPs = Kparams.DPs_out + 4 + pos * GPU_DP_SIZE / 4;
 	*(int4*)&DPs[0] = rx;
-	*(int4*)&DPs[4] = ((int4*)d)[0];
-	*(int4*)&DPs[8] = ((int4*)d)[1];
+	DPs[4] = (u32)d1[0];
+	DPs[5] = (u32)(d1[0] >> 32);
+	DPs[6] = (u32)d1[1];
+	DPs[7] = (u32)(d1[1] >> 32);
+	DPs[8] = (u32)d2[0];
+	DPs[9] = (u32)(d2[0] >> 32);
+	DPs[10] = (u32)d2[1];
+	DPs[11] = (u32)(d2[1] >> 32);
 	DPs[12] = 3 * kang_ind / Kparams.KangCnt; //kang type
 }
 
