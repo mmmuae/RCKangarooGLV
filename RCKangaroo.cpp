@@ -39,8 +39,9 @@ EcInt Int_TameOffset;
 Ec ec;
 
 CriticalSection csAddPoints;
-u8* pPntList;
-u8* pPntList2;
+std::vector<u8> gPntList;
+std::vector<u8> gPntListScratch;
+size_t gPntListCapacity = 0;
 volatile int PntIndex;
 TFastBase db;
 EcPoint gPntToSolve;
@@ -116,6 +117,25 @@ struct DpMeta
         EcInt k2;
         int type;
 };
+
+static constexpr u8 kTypeMask = 0x3;
+static constexpr u8 kTagShift = 2;
+static constexpr u8 kTagMask = 0x7 << kTagShift;
+
+static u8 PackTypeTag(u8 type, u8 tag)
+{
+        return (type & kTypeMask) | ((tag & 0x7) << kTagShift);
+}
+
+static u8 UnpackType(u8 packed)
+{
+        return packed & kTypeMask;
+}
+
+static u8 UnpackTag(u8 packed)
+{
+        return (packed & kTagMask) >> kTagShift;
+}
 
 static constexpr size_t kDpMetaQueueSize = 1u << 20;
 static_assert((kDpMetaQueueSize & (kDpMetaQueueSize - 1)) == 0, "kDpMetaQueueSize must be power of two");
@@ -285,6 +305,27 @@ static void CanonicalizeGlvPairForOrdering(const EcInt& k1, const EcInt& k2, EcI
         }
         out1 = best1;
         out2 = best2;
+}
+
+static void UncanonicalizeGlvPair(const EcInt& k1, const EcInt& k2, u8 tag, EcInt& out1, EcInt& out2)
+{
+        int rot = tag & 0x3;
+        bool neg = (tag & 0x4) != 0;
+        EcInt a = k1;
+        EcInt b = k2;
+        if (neg)
+        {
+                a.Neg();
+                b.Neg();
+        }
+
+        int inv_rot = 0;
+        if (rot == 1)
+                inv_rot = 2;
+        else if (rot == 2)
+                inv_rot = 1;
+
+        ApplyGlvRotation(a, b, inv_rot, out1, out2);
 }
 
 static EcInt CombineScalarDistanceForOrdering(const EcInt& k1, const EcInt& k2)
@@ -695,13 +736,16 @@ void* kang_thr_proc(void* data)
 void AddPointsToList(u32* data, int pnt_cnt, u64 ops_cnt)
 {
 	csAddPoints.Enter();
-	if (PntIndex + pnt_cnt >= MAX_CNT_LIST)
+	int required = PntIndex + pnt_cnt;
+	if (required > static_cast<int>(gPntListCapacity))
 	{
-		csAddPoints.Leave();
-		printf("\n\rDPs buffer overflow, some points lost, increase DP value!\r\n");
-		return;
+		size_t new_capacity = gPntListCapacity ? gPntListCapacity : MAX_CNT_LIST;
+		while (new_capacity < static_cast<size_t>(required))
+			new_capacity *= 2;
+		gPntList.resize(new_capacity * GPU_DP_SIZE);
+		gPntListCapacity = new_capacity;
 	}
-	memcpy(pPntList + GPU_DP_SIZE * PntIndex, data, pnt_cnt * GPU_DP_SIZE);
+	memcpy(gPntList.data() + GPU_DP_SIZE * PntIndex, data, pnt_cnt * GPU_DP_SIZE);
 	PntIndex += pnt_cnt;
 	PntTotalOps += ops_cnt;
 	csAddPoints.Leave();
@@ -759,18 +803,25 @@ void CheckNewPoints()
 	}
 
 	int cnt = PntIndex;
-	memcpy(pPntList2, pPntList, GPU_DP_SIZE * cnt);
+	if (static_cast<size_t>(cnt) > gPntListScratch.size() / GPU_DP_SIZE)
+		gPntListScratch.resize(static_cast<size_t>(cnt) * GPU_DP_SIZE);
+	memcpy(gPntListScratch.data(), gPntList.data(), GPU_DP_SIZE * cnt);
 	PntIndex = 0;
 	csAddPoints.Leave();
 
         for (int i = 0; i < cnt; i++)
         {
                 DBRec nrec;
-                u8* p = pPntList2 + i * GPU_DP_SIZE;
+		u8* p = gPntListScratch.data() + i * GPU_DP_SIZE;
                 memcpy(nrec.x, p, 12);
                 memcpy(nrec.d1, p + 16, 16);
                 memcpy(nrec.d2, p + 32, 16);
-                nrec.type = gGenMode ? TAME : p[48];
+		u8 type = gGenMode ? TAME : p[48];
+		u8 tag = gGlvCanonicalWalk ? (p[52] & 0x7) : 0;
+		nrec.type = PackTypeTag(type, tag);
+
+		u8 nrecType = UnpackType(nrec.type);
+		u8 nrecTag = UnpackTag(nrec.type);
 
                 EcInt k1;
                 EcInt k2;
@@ -785,8 +836,8 @@ void CheckNewPoints()
                         k2.SetZero();
                 }
 
-                if (!gGenMode)
-                        EnqueueDpMeta(k1, k2, nrec.type);
+		if (!gGenMode)
+			EnqueueDpMeta(k1, k2, nrecType);
 
                 DBRec* pref = (DBRec*)db.FindOrAddDataBlock((u8*)&nrec);
                 if (gGenMode)
@@ -799,10 +850,12 @@ void CheckNewPoints()
 			memcpy(((u8*)&tmp_pref) + 3, pref, sizeof(DBRec) - 3);
 			pref = &tmp_pref;
 
-			if (pref->type == nrec.type)
-			{
-				if (pref->type == TAME)
-					continue;
+		u8 prefType = UnpackType(pref->type);
+		u8 prefTag = UnpackTag(pref->type);
+		if (prefType == nrecType)
+		{
+			if (prefType == TAME)
+				continue;
 
 				//if it's wild, we can find the key from the same type if distances are different
 				if (!memcmp(pref->d1, nrec.d1, sizeof(nrec.d1)) && !memcmp(pref->d2, nrec.d2, sizeof(nrec.d2)))
@@ -813,38 +866,58 @@ void CheckNewPoints()
 
 			EcInt w1, w2, t1, t2;
 			int TameType, WildType;
-			if (pref->type != TAME)
+		if (prefType != TAME)
+		{
+			w1 = DeserializeDistance128(pref->d1);
+			w2 = DeserializeDistance128(pref->d2);
+			t1 = DeserializeDistance128(nrec.d1);
+			t2 = DeserializeDistance128(nrec.d2);
+			if (!gGlvMode)
 			{
-				w1 = DeserializeDistance128(pref->d1);
-				w2 = DeserializeDistance128(pref->d2);
-				t1 = DeserializeDistance128(nrec.d1);
-				t2 = DeserializeDistance128(nrec.d2);
-				if (!gGlvMode)
-				{
-					w1 = DeserializeDistance256(pref->d1);
-					w2.SetZero();
-					t1 = DeserializeDistance256(nrec.d1);
-					t2.SetZero();
-				}
-				TameType = nrec.type;
-				WildType = pref->type;
+				w1 = DeserializeDistance256(pref->d1);
+				w2.SetZero();
+				t1 = DeserializeDistance256(nrec.d1);
+				t2.SetZero();
 			}
-			else
+			if (gGlvCanonicalWalk)
 			{
-				w1 = DeserializeDistance128(nrec.d1);
-				w2 = DeserializeDistance128(nrec.d2);
-				t1 = DeserializeDistance128(pref->d1);
-				t2 = DeserializeDistance128(pref->d2);
-				if (!gGlvMode)
-				{
-					w1 = DeserializeDistance256(nrec.d1);
-					w2.SetZero();
-					t1 = DeserializeDistance256(pref->d1);
-					t2.SetZero();
-				}
-				TameType = TAME;
-				WildType = nrec.type;
+				EcInt tw1, tw2, tt1, tt2;
+				UncanonicalizeGlvPair(w1, w2, prefTag, tw1, tw2);
+				UncanonicalizeGlvPair(t1, t2, nrecTag, tt1, tt2);
+				w1 = tw1;
+				w2 = tw2;
+				t1 = tt1;
+				t2 = tt2;
 			}
+			TameType = nrecType;
+			WildType = prefType;
+		}
+		else
+		{
+			w1 = DeserializeDistance128(nrec.d1);
+			w2 = DeserializeDistance128(nrec.d2);
+			t1 = DeserializeDistance128(pref->d1);
+			t2 = DeserializeDistance128(pref->d2);
+			if (!gGlvMode)
+			{
+				w1 = DeserializeDistance256(nrec.d1);
+				w2.SetZero();
+				t1 = DeserializeDistance256(pref->d1);
+				t2.SetZero();
+			}
+			if (gGlvCanonicalWalk)
+			{
+				EcInt tw1, tw2, tt1, tt2;
+				UncanonicalizeGlvPair(w1, w2, nrecTag, tw1, tw2);
+				UncanonicalizeGlvPair(t1, t2, prefTag, tt1, tt2);
+				w1 = tw1;
+				w2 = tw2;
+				t1 = tt1;
+				t2 = tt2;
+			}
+			TameType = TAME;
+			WildType = nrecType;
+		}
 
 			// Verify if this is a collision (matching X coordinate)
 			bool res = Collision_SOTA(gPntToSolve, t1, t2, TameType, w1, w2, WildType, false);
@@ -852,7 +925,7 @@ void CheckNewPoints()
 				res = res || Collision_SOTA(gPntToSolve, t1, t2, TameType, w1, w2, WildType, true);
 			if (!res)
 			{
-				bool w12 = ((pref->type == WILD1) && (nrec.type == WILD2)) || ((pref->type == WILD2) && (nrec.type == WILD1));
+				bool w12 = ((prefType == WILD1) && (nrecType == WILD2)) || ((prefType == WILD2) && (nrecType == WILD1));
 				if (w12) //in rare cases WILD and WILD2 can collide in mirror, in this case there is no way to find K
 					;// ToLog("W1 and W2 collides in mirror");
 				else
@@ -983,7 +1056,7 @@ bool SolvePoint(EcPoint PntToSolve, EcInt& RangeWidth, int RangeBits, int DP, Ec
                 printf("Unsupported Range value (%d)!\r\n", RangeBits);
                 return false;
         }
-        if ((DP < 14) || (DP > 60))
+        if ((DP < 1) || (DP > 60))
         {
                 printf("Unsupported DP value (%d)!\r\n", DP);
                 return false;
@@ -1267,7 +1340,7 @@ bool ParseCommandLine(int argc, char* argv[])
 			printf("Usage: RCKangaroo [options]\r\n");
 			printf("Options:\r\n");
 			printf("  -gpu <mask>                 GPU indices mask, e.g. 012\r\n");
-			printf("  -d <bits>                   DP bits (14..60)\r\n");
+			printf("  -d <bits>                   DP bits (1..60)\r\n");
 			printf("  --start-hex <hex>           Range start (hex)\r\n");
 			printf("  --end-hex <hex>             Range end (hex)\r\n");
 			printf("  --start-dec <dec>           Range start (decimal)\r\n");
@@ -1550,8 +1623,9 @@ int main(int argc, char* argv[])
 		return 0;
 	}
 
-	pPntList = (u8*)malloc(MAX_CNT_LIST * GPU_DP_SIZE);
-	pPntList2 = (u8*)malloc(MAX_CNT_LIST * GPU_DP_SIZE);
+	gPntListCapacity = MAX_CNT_LIST;
+	gPntList.resize(gPntListCapacity * GPU_DP_SIZE);
+	gPntListScratch.clear();
 	TotalOps = 0;
 	TotalSolved = 0;
 	gTotalErrors = 0;
@@ -1661,8 +1735,8 @@ label_end:
 	for (int i = 0; i < GpuCnt; i++)
 		delete GpuKangs[i];
 	DeInitEc();
-	free(pPntList2);
-	free(pPntList);
+	gPntList.clear();
+	gPntListScratch.clear();
 }
 
 
