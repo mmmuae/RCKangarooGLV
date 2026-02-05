@@ -78,6 +78,7 @@ double gMax;
 bool gGenMode; //tames generation mode
 bool gIsOpsLimit;
 bool gGlvMode;
+bool gGlvCanonicalWalk;
 
 // Gap tracking helpers
 struct DistanceEntry
@@ -85,6 +86,7 @@ struct DistanceEntry
         EcInt k1;
         EcInt k2;
         EcInt scalar;
+        EcInt orderScalar;
         int type;
 };
 
@@ -94,8 +96,8 @@ struct DistanceEntryLess
         {
                 for (int i = 4; i >= 0; --i)
                 {
-                        if (a.scalar.data[i] != b.scalar.data[i])
-                                return a.scalar.data[i] < b.scalar.data[i];
+                        if (a.orderScalar.data[i] != b.orderScalar.data[i])
+                                return a.orderScalar.data[i] < b.orderScalar.data[i];
                 }
         return a.type < b.type;
         }
@@ -215,6 +217,83 @@ static EcInt CombineScalarDistance(const EcInt& k1, const EcInt& k2)
         EcInt t1 = k1;
         EcInt t2 = k2;
         return ec.CombineScalar(t1, t2);
+}
+
+static bool GlvLexLess(const EcInt& a1, const EcInt& a2, const EcInt& b1, const EcInt& b2)
+{
+        EcInt b1c = b1;
+        EcInt a1c = a1;
+        if (a1c.IsLessThanI(b1c))
+                return true;
+        if (b1c.IsLessThanI(a1c))
+                return false;
+        EcInt a2c = a2;
+        EcInt b2c = b2;
+        return a2c.IsLessThanI(b2c);
+}
+
+static void ApplyGlvRotation(const EcInt& k1, const EcInt& k2, int rot, EcInt& out1, EcInt& out2)
+{
+        if (rot == 0)
+        {
+                out1 = k1;
+                out2 = k2;
+                return;
+        }
+
+        EcInt sum = k1;
+        EcInt k2c = k2;
+        sum.Add(k2c);
+        sum.Neg();
+
+        if (rot == 1)
+        {
+                out1 = k2;
+                out2 = sum;
+        }
+        else
+        {
+                out1 = sum;
+                out2 = k1;
+        }
+}
+
+static void CanonicalizeGlvPairForOrdering(const EcInt& k1, const EcInt& k2, EcInt& out1, EcInt& out2)
+{
+        EcInt best1, best2;
+        bool hasBest = false;
+        for (int rot = 0; rot < 3; ++rot)
+        {
+                EcInt r1, r2;
+                ApplyGlvRotation(k1, k2, rot, r1, r2);
+                for (int neg = 0; neg < 2; ++neg)
+                {
+                        EcInt c1 = r1;
+                        EcInt c2 = r2;
+                        if (neg)
+                        {
+                                c1.Neg();
+                                c2.Neg();
+                        }
+                        if (!hasBest || GlvLexLess(c1, c2, best1, best2))
+                        {
+                                best1 = c1;
+                                best2 = c2;
+                                hasBest = true;
+                        }
+                }
+        }
+        out1 = best1;
+        out2 = best2;
+}
+
+static EcInt CombineScalarDistanceForOrdering(const EcInt& k1, const EcInt& k2)
+{
+        if (!gGlvMode)
+                return k1;
+        EcInt c1, c2;
+        CanonicalizeGlvPairForOrdering(k1, k2, c1, c2);
+        return ec.CombineScalar(c1, c2);
 }
 
 static EcPoint CombineJumpPoint(EcInt& k1, EcInt& k2)
@@ -418,13 +497,15 @@ static EcInt EstimateKeyFromPair(const DistanceEntry& a, const DistanceEntry& b)
 
                         if (EvaluateTameWild(tameDist, wildDist, false))
                                 return bestKey;
-                        EvaluateTameWild(tameDist, wildDist, true);
+                        if (!gGlvCanonicalWalk)
+                                EvaluateTameWild(tameDist, wildDist, true);
         }
         else
         {
                         if (EvaluateWildPair(a.scalar, b.scalar, false))
                                 return bestKey;
-                        EvaluateWildPair(a.scalar, b.scalar, true);
+                        if (!gGlvCanonicalWalk)
+                                EvaluateWildPair(a.scalar, b.scalar, true);
         }
 
         if (!hasBest)
@@ -481,7 +562,7 @@ static void ProcessDpMeta(const DpMeta& meta)
         else if (meta.type == WILD2)
                 gWild2Count.fetch_add(1, std::memory_order_relaxed);
 
-        DistanceEntry entry{meta.k1, meta.k2, CombineScalarDistance(meta.k1, meta.k2), meta.type};
+        DistanceEntry entry{meta.k1, meta.k2, CombineScalarDistance(meta.k1, meta.k2), CombineScalarDistanceForOrdering(meta.k1, meta.k2), meta.type};
         if (meta.type == TAME)
         {
                 gTameDistances.insert(entry);
@@ -766,8 +847,9 @@ void CheckNewPoints()
 			}
 
 			// Verify if this is a collision (matching X coordinate)
-			bool res = Collision_SOTA(gPntToSolve, t1, t2, TameType, w1, w2, WildType, false) ||
-                                   Collision_SOTA(gPntToSolve, t1, t2, TameType, w1, w2, WildType, true);
+			bool res = Collision_SOTA(gPntToSolve, t1, t2, TameType, w1, w2, WildType, false);
+			if (!gGlvCanonicalWalk)
+				res = res || Collision_SOTA(gPntToSolve, t1, t2, TameType, w1, w2, WildType, true);
 			if (!res)
 			{
 				bool w12 = ((pref->type == WILD1) && (nrec.type == WILD2)) || ((pref->type == WILD2) && (nrec.type == WILD1));
@@ -999,10 +1081,12 @@ bool SolvePoint(EcPoint PntToSolve, EcInt& RangeWidth, int RangeBits, int DP, Ec
         gBestDistanceA.k1.SetZero();
         gBestDistanceA.k2.SetZero();
         gBestDistanceA.scalar.SetZero();
+        gBestDistanceA.orderScalar.SetZero();
         gBestDistanceA.type = 0;
         gBestDistanceB.k1.SetZero();
         gBestDistanceB.k2.SetZero();
         gBestDistanceB.scalar.SetZero();
+        gBestDistanceB.orderScalar.SetZero();
         gBestDistanceB.type = 0;
 //prepare jumps
         EcInt minjump, t;
@@ -1452,9 +1536,11 @@ int main(int argc, char* argv[])
         gGenMode = false;
         gIsOpsLimit = false;
         gGlvMode = false;
+        gGlvCanonicalWalk = false;
 	memset(gGPUs_Mask, 1, sizeof(gGPUs_Mask));
 	if (!ParseCommandLine(argc, argv))
 		return 0;
+        gGlvCanonicalWalk = gGlvMode;
 
 	InitGpus();
 

@@ -87,9 +87,9 @@ struct TKparams
 	u64* Jumps1; //x(32b), y(32b), d(32b)
 	u64* Jumps2; //x(32b), y(32b), d(32b)
 	u64* Jumps3; //x(32b), y(32b), d(32b)
-	u64* JumpsList; //list of all performed jumps, grouped by warp(32) every 8 groups (from PNT_GROUP_CNT). Each jump is 2 bytes: 10bit jump index + flags: INV_FLAG, DP_FLAG, JMP2_FLAG
+	u32* JumpsList; //list of all performed jumps, grouped by warp(32) every 8 groups (from PNT_GROUP_CNT). Each jump is 2 bytes: 10bit jump index + flags: INV_FLAG, DP_FLAG, JMP2_FLAG
+	u32* JumpsTag; //parallel list of GLV canonicalization tags per jump
 	u32* DPTable;
-	u32* DPTag;
 	u32* L1S2;
 	u64* LastPnts;
 	u64* LoopTable;

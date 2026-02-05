@@ -152,15 +152,18 @@ __global__ void KernelA(const TKparams Kparams)
 	u64* L2x = Kparams.L2 + 2 * THREAD_X + 4 * BLOCK_SIZE * BLOCK_X;
 	u64* L2y = L2x + 4 * PNT_GROUP_CNT * BLOCK_CNT * BLOCK_SIZE;
 	u64* L2s = L2y + 4 * PNT_GROUP_CNT * BLOCK_CNT * BLOCK_SIZE;
-	//list of distances of performed jumps for KernelB
-	int4* jlist = (int4*)(Kparams.JumpsList + (u64)BLOCK_X * STEP_CNT * PNT_GROUP_CNT * BLOCK_SIZE / 4);
-	jlist += (THREAD_X / 32) * 32 * PNT_GROUP_CNT / 8;
+//list of distances of performed jumps for KernelB
+int4* jlist = (int4*)(Kparams.JumpsList + (u64)BLOCK_X * STEP_CNT * PNT_GROUP_CNT * BLOCK_SIZE / 2);
+int4* jtaglist = (int4*)(Kparams.JumpsTag + (u64)BLOCK_X * STEP_CNT * PNT_GROUP_CNT * BLOCK_SIZE / 2);
+jlist += (THREAD_X / 32) * 32 * PNT_GROUP_CNT / 8;
+jtaglist += (THREAD_X / 32) * 32 * PNT_GROUP_CNT / 8;
 	//list of last visited points for KernelC
 	u64* x_last0 = Kparams.LastPnts + 2 * THREAD_X + 4 * BLOCK_SIZE * BLOCK_X;
 	u64* y_last0 = x_last0 + 4 * PNT_GROUP_CNT * BLOCK_CNT * BLOCK_SIZE;
       
 	u64* jmp1_table = LDS; //32KB
-	u16* lds_jlist = (u16*)&LDS[8 * JMP_CNT]; //4KB, must be aligned 16bytes
+u16* lds_jlist = (u16*)&LDS[8 * JMP_CNT]; //4KB, must be aligned 16bytes
+u16* lds_jtag = lds_jlist + 8 * BLOCK_SIZE;
 
 	int i = THREAD_X;
 	while (i < JMP_CNT)
@@ -236,12 +239,12 @@ __global__ void KernelA(const TKparams Kparams)
 			jmp_table = ((L1S2 >> group) & 1) ? jmp2_table : jmp1_table;
 			Copy_int4_x2(jmp_x, jmp_table + 8 * jmp_ind);
 			Copy_int4_x2(jmp_y, jmp_table + 8 * jmp_ind + 4);
-			u32 inv_flag = (u32)y0[0] & 1;
-			if (inv_flag)
-			{
-				jmp_ind |= INV_FLAG;
-				NegModP(jmp_y);
-			}
+            u32 inv_flag = (u32)y0[0] & 1;
+            if (inv_flag)
+            {
+                jmp_ind |= INV_FLAG;
+                NegModP(jmp_y);
+            }
             if (group)
             {
 				LOAD_VAL_256(tmp, L2s, group - 1);
@@ -277,27 +280,27 @@ __global__ void KernelA(const TKparams Kparams)
 				jmp_ind |= JMP2_FLAG;
 			}
 			
-			if ((x[3] & dp_mask64) == 0)
-			{
-				u32 kang_ind = (THREAD_X + BLOCK_X * BLOCK_SIZE) * PNT_GROUP_CNT + group;
-				u32 ind = atomicAdd(Kparams.DPTable + kang_ind, 1);
-				ind = min(ind, DPTABLE_MAX_CNT - 1);
-				int4* dst = (int4*)(Kparams.DPTable + Kparams.KangCnt + (kang_ind * DPTABLE_MAX_CNT + ind) * 4);
-				u32 tag = 0;
-				u64 x_can[4];
-				u64 y_can[4];
-				Copy256(x_can, x);
-				Copy256(y_can, y);
-				if (Kparams.IsGlvMode)
-					tag = CanonicalizePointGlv(x_can, y_can);
-				dst[0] = ((int4*)x_can)[0];
-				Kparams.DPTag[kang_ind * DPTABLE_MAX_CNT + ind] = tag;
-				jmp_ind |= DP_FLAG;
-			}
+            u16 tag = 0;
+            if (Kparams.IsGlvMode)
+                tag = (u16)CanonicalizePointGlv(x, y);
 
-			lds_jlist[8 * THREAD_X + (group % 8)] = jmp_ind;
-			if ((group % 8) == 0)
-				st_cs_v4_b32(&jlist[(group / 8) * 32 + (THREAD_X % 32)], *(int4*)&lds_jlist[8 * THREAD_X]); //skip L2 cache
+            if ((x[3] & dp_mask64) == 0)
+            {
+                u32 kang_ind = (THREAD_X + BLOCK_X * BLOCK_SIZE) * PNT_GROUP_CNT + group;
+                u32 ind = atomicAdd(Kparams.DPTable + kang_ind, 1);
+                ind = min(ind, DPTABLE_MAX_CNT - 1);
+                int4* dst = (int4*)(Kparams.DPTable + Kparams.KangCnt + (kang_ind * DPTABLE_MAX_CNT + ind) * 4);
+                dst[0] = ((int4*)x)[0];
+                jmp_ind |= DP_FLAG;
+            }
+
+            lds_jlist[8 * THREAD_X + (group % 8)] = jmp_ind;
+            lds_jtag[8 * THREAD_X + (group % 8)] = tag;
+            if ((group % 8) == 0)
+            {
+                st_cs_v4_b32(&jlist[(group / 8) * 32 + (THREAD_X % 32)], *(int4*)&lds_jlist[8 * THREAD_X]); //skip L2 cache
+                st_cs_v4_b32(&jtaglist[(group / 8) * 32 + (THREAD_X % 32)], *(int4*)&lds_jtag[8 * THREAD_X]);
+            }
 
 			if (step_ind + MD_LEN >= STEP_CNT) //store last kangs to be able to find loop exit point
 			{
@@ -345,14 +348,17 @@ __global__ void KernelA(const TKparams Kparams)
 	__align__(16) u64 Ls[4 * PNT_GROUP_CNT / 2]; //we store only half so need only half mem
 
 	//list of distances of performed jumps for KernelB
-	int4* jlist = (int4*)(Kparams.JumpsList + (u64)BLOCK_X * STEP_CNT * PNT_GROUP_CNT * BLOCK_SIZE / 4);
+	int4* jlist = (int4*)(Kparams.JumpsList + (u64)BLOCK_X * STEP_CNT * PNT_GROUP_CNT * BLOCK_SIZE / 2);
+	int4* jtaglist = (int4*)(Kparams.JumpsTag + (u64)BLOCK_X * STEP_CNT * PNT_GROUP_CNT * BLOCK_SIZE / 2);
 	jlist += (THREAD_X / 32) * 32 * PNT_GROUP_CNT / 8;
+	jtaglist += (THREAD_X / 32) * 32 * PNT_GROUP_CNT / 8;
 	//list of last visited points for KernelC
 	u64* x_last0 = Kparams.LastPnts + 2 * THREAD_X + 4 * BLOCK_SIZE * BLOCK_X;
 	u64* y_last0 = x_last0 + 4 * PNT_GROUP_CNT * BLOCK_CNT * BLOCK_SIZE;
 
 	u64* jmp1_table = LDS; //32KB
 	u16* lds_jlist = (u16*)&LDS[8 * JMP_CNT]; //8KB, must be aligned 16bytes
+	u16* lds_jtag = lds_jlist + 8 * BLOCK_SIZE;
 
 	int i = THREAD_X;
 	while (i < JMP_CNT)
@@ -523,6 +529,10 @@ __global__ void KernelA(const TKparams Kparams)
 				jmp_ind |= JMP2_FLAG;
 			}
 
+			u16 tag = 0;
+			if (Kparams.IsGlvMode)
+				tag = (u16)CanonicalizePointGlv(x, y);
+
 			if ((x[3] & dp_mask64) == 0)
 			{
 				u32 kang_ind = (THREAD_X + BLOCK_X * BLOCK_SIZE) * PNT_GROUP_CNT + group;
@@ -542,8 +552,12 @@ __global__ void KernelA(const TKparams Kparams)
 			}
 
 			lds_jlist[8 * THREAD_X + (group % 8)] = jmp_ind;
+			lds_jtag[8 * THREAD_X + (group % 8)] = tag;
 			if (((group + jlast_add) % 8) == 0)
+			{
 				st_cs_v4_b32(&jlist[(group / 8) * 32 + (THREAD_X % 32)], *(int4*)&lds_jlist[8 * THREAD_X]); //skip L2 cache
+				st_cs_v4_b32(&jtaglist[(group / 8) * 32 + (THREAD_X % 32)], *(int4*)&lds_jtag[8 * THREAD_X]);
+			}
 
 			if (step_ind + MD_LEN >= STEP_CNT) //store last kangs to be able to find loop exit point
 			{
@@ -624,11 +638,8 @@ __device__ __forceinline__ void BuildDP(const TKparams& Kparams, int kang_ind, u
 	if (ind >= DPTABLE_MAX_CNT)
 		return;
 	int4 rx = *(int4*)(Kparams.DPTable + Kparams.KangCnt + (kang_ind * DPTABLE_MAX_CNT + ind) * 4);
-	u32 tag = Kparams.DPTag[kang_ind * DPTABLE_MAX_CNT + ind];
 	u64 d1[2] = {d[0], d[1]};
 	u64 d2[2] = {d[2], d[3]};
-	if (Kparams.IsGlvMode)
-		CanonicalizeDistanceGlv(d1, d2, tag);
 	u32 pos = atomicAdd(Kparams.DPs_out, 1);
 	pos = min(pos, MAX_DP_CNT - 1);
 	u32* DPs = Kparams.DPs_out + 4 + pos * GPU_DP_SIZE / 4;
@@ -682,7 +693,7 @@ struct JumpDistanceOps<false>
 };
 
 template <bool kGlvMode>
-__device__ __forceinline__ bool ProcessJumpDistance(u32 step_ind, u32 d_cur, u64* d, u32 kang_ind, u64* jmp1_d, u64* jmp2_d, const TKparams& Kparams, u64* table, u32* cur_ind, u8 iter)
+__device__ __forceinline__ bool ProcessJumpDistance(u32 step_ind, u32 d_cur, u16 tag, u64* d, u32 kang_ind, u64* jmp1_d, u64* jmp2_d, const TKparams& Kparams, u64* table, u32* cur_ind, u8 iter)
 {
 	u64* jmp_d = (d_cur & JMP2_FLAG) ? jmp2_d : jmp1_d;
 
@@ -691,6 +702,8 @@ __device__ __forceinline__ bool ProcessJumpDistance(u32 step_ind, u32 d_cur, u64
 	((int4*)(jmp))[1] = ((int4*)(jmp_d + 4 * (d_cur & JMP_MASK) + 2))[0];
 
 	JumpDistanceOps<kGlvMode>::Apply(d, jmp, d_cur);
+	if (kGlvMode && tag)
+		CanonicalizeDistanceGlv(d, d + 2, tag);
 
 	//check in table
 	int found_ind = iter + MD_LEN - 4;
@@ -734,13 +747,17 @@ __device__ __forceinline__ bool ProcessJumpDistance(u32 step_ind, u32 d_cur, u64
 
 #define DO_ITER(iter) {\
 	u32 cur_dAB = jlist[THREAD_X]; \
+	u32 cur_tagAB = jtaglist[THREAD_X]; \
 	u16 cur_dA = cur_dAB & 0xFFFF; \
 	u16 cur_dB = cur_dAB >> 16; \
+	u16 cur_tagA = cur_tagAB & 0xFFFF; \
+	u16 cur_tagB = cur_tagAB >> 16; \
 	if (!LoopedA) \
-		LoopedA = ProcessJumpDistance<kGlvMode>(step_ind, cur_dA, dA, kang_ind, jmp1_d, jmp2_d, Kparams, RegsA, &cur_indA, iter); \
+		LoopedA = ProcessJumpDistance<kGlvMode>(step_ind, cur_dA, cur_tagA, dA, kang_ind, jmp1_d, jmp2_d, Kparams, RegsA, &cur_indA, iter); \
 	if (!LoopedB) \
-		LoopedB = ProcessJumpDistance<kGlvMode>(step_ind, cur_dB, dB, kang_ind + 1, jmp1_d, jmp2_d, Kparams, RegsB, &cur_indB, iter); \
+		LoopedB = ProcessJumpDistance<kGlvMode>(step_ind, cur_dB, cur_tagB, dB, kang_ind + 1, jmp1_d, jmp2_d, Kparams, RegsB, &cur_indB, iter); \
 	jlist += BLOCK_SIZE * PNT_GROUP_CNT / 2; \
+	jtaglist += BLOCK_SIZE * PNT_GROUP_CNT / 2; \
 	step_ind++; \
 }
 
@@ -773,7 +790,8 @@ __device__ __forceinline__ void KernelBBody(const TKparams& Kparams)
 		i += BLOCK_SIZE;
 	}
 
-	u32* jlist0 = (u32*)(Kparams.JumpsList + (u64)BLOCK_X * STEP_CNT * PNT_GROUP_CNT * BLOCK_SIZE / 4);
+	u32* jlist0 = (u32*)(Kparams.JumpsList + (u64)BLOCK_X * STEP_CNT * PNT_GROUP_CNT * BLOCK_SIZE / 2);
+	u32* jtaglist0 = (u32*)(Kparams.JumpsTag + (u64)BLOCK_X * STEP_CNT * PNT_GROUP_CNT * BLOCK_SIZE / 2);
 
 	__syncthreads();
 
@@ -792,6 +810,7 @@ __device__ __forceinline__ void KernelBBody(const TKparams& Kparams)
 		u32 cur_indB = 0;
 
 		u32* jlist = jlist0 + gr_ind2 * BLOCK_SIZE;
+		u32* jtaglist = jtaglist0 + gr_ind2 * BLOCK_SIZE;
 
 		//calc original kang_ind
 		u32 tind = (THREAD_X + gr_ind2 * BLOCK_SIZE); //0..3071
