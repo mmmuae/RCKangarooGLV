@@ -519,13 +519,13 @@ __device__ __forceinline__ bool ProcessJumpDistance(u32 step_ind, u32 d_cur, u64
 			Add128to128(d + 2, jmp + 2);
 		}
 	}
+	else
+	{
+		if (d_cur & INV_FLAG)
+			Sub256from256(d, jmp);
 		else
-		{
-			if (d_cur & INV_FLAG)
-				Sub256from256(d, jmp);
-			else
-				Add256to256(d, jmp);
-		}
+			Add256to256(d, jmp);
+	}
 
 	//check in table
 	int found_ind = iter + MD_LEN - 4;
