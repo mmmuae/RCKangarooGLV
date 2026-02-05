@@ -5,6 +5,7 @@
 
 
 #include <iostream>
+#include <cmath>
 #include "cuda_runtime.h"
 #include "cuda.h"
 
@@ -71,6 +72,33 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _RangeBits, int _DP, EcInt _Ran
 	Kparams.KernelC_LDS_Size = 96 * JMP_CNT;
 	Kparams.IsGenMode = gGenMode;
 	Kparams.IsGlvMode = gGlvMode;
+	Kparams.DPOutMax = MAX_DP_CNT;
+	DPOutMax = MAX_DP_CNT;
+
+	{
+		double expected_dps = (double)KangCnt * STEP_CNT / pow(2.0, DP);
+		double headroom = gGlvMode ? 8.0 : 4.0;
+		u64 desired = (u64)ceil(expected_dps * headroom) + 1024;
+		if (desired < 16384)
+			desired = 16384;
+		if (desired > 0x7FFFFFFF)
+			desired = 0x7FFFFFFF;
+
+		size_t free_mem = 0;
+		size_t total_mem_info = 0;
+		if (cudaMemGetInfo(&free_mem, &total_mem_info) == cudaSuccess)
+		{
+			size_t max_buffer = free_mem / 4;
+			u64 max_records = (u64)(max_buffer / GPU_DP_SIZE);
+			if (max_records < 1024)
+				max_records = 1024;
+			if (desired > max_records)
+				desired = max_records;
+		}
+
+		DPOutMax = (u32)desired;
+		Kparams.DPOutMax = DPOutMax;
+	}
 
 //allocate gpu mem
 	u64 size;
@@ -103,7 +131,7 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _RangeBits, int _DP, EcInt _Ran
 			return false;
 		}
 	}
-	size = MAX_DP_CNT * GPU_DP_SIZE + 16;
+	size = (u64)DPOutMax * GPU_DP_SIZE + 16;
 	total_mem += size;
 	err = cudaMalloc((void**)&Kparams.DPs_out, size);
 	if (err != cudaSuccess)
@@ -223,7 +251,7 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _RangeBits, int _DP, EcInt _Ran
 		return false;
 	}
 
-	DPs_out = (u32*)malloc(MAX_DP_CNT * GPU_DP_SIZE);
+	DPs_out = (u32*)malloc((u64)DPOutMax * GPU_DP_SIZE);
 
 //jmp1
 	u64* buf = (u64*)malloc(JMP_CNT * 96);
@@ -526,9 +554,9 @@ void RCGpuKang::Execute()
 			break;
 		}
 		
-		if (cnt >= MAX_DP_CNT)
+		if (cnt >= (int)DPOutMax)
 		{
-			cnt = MAX_DP_CNT;
+			cnt = DPOutMax;
 			printf("GPU %d, gpu DP buffer overflow, some points lost, increase DP value!\r\n", CudaIndex);
 		}
 		u64 pnt_cnt = (u64)KangCnt * STEP_CNT;
