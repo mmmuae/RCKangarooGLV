@@ -243,41 +243,6 @@ static EcPoint CombineJumpPoint(EcInt& k1, EcInt& k2)
         return ec.AddPoints(p1, p2);
 }
 
-static EcInt CombineScalarDistance(const EcInt& k1, const EcInt& k2)
-{
-        if (!gGlvMode)
-                return k1;
-        EcInt t1 = k1;
-        EcInt t2 = k2;
-        return ec.CombineScalar(t1, t2);
-}
-
-static EcPoint CombineJumpPoint(EcInt& k1, EcInt& k2)
-{
-        if (!gGlvMode)
-                return ec.MultiplyG(k1);
-
-        auto MultiplyG_Signed = [](EcInt& k) {
-                EcInt kk = k;
-                bool is_neg = (kk.data[4] >> 63) != 0;
-                if (is_neg)
-                        kk.Neg();
-                EcPoint p = ec.MultiplyG(kk);
-                if (is_neg)
-                        p.y.NegModP();
-                return p;
-        };
-
-        if (k1.IsZero())
-                return ec.Multiply(gPhiG, k2);
-        if (k2.IsZero())
-                return MultiplyG_Signed(k1);
-
-        EcPoint p1 = MultiplyG_Signed(k1);
-        EcPoint p2 = ec.Multiply(gPhiG, k2);
-        return ec.AddPoints(p1, p2);
-}
-
 // Normalize a candidate key so it always falls inside the configured search range
 static EcInt NormalizeKeyToRange(const EcInt& cand)
 {
