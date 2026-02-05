@@ -539,7 +539,15 @@ __global__ void KernelA(const TKparams Kparams)
 				u32 ind = atomicAdd(Kparams.DPTable + kang_ind, 1);
 				ind = min(ind, DPTABLE_MAX_CNT - 1);
 				int4* dst = (int4*)(Kparams.DPTable + Kparams.KangCnt + (kang_ind * DPTABLE_MAX_CNT + ind) * 4);
-				dst[0] = ((int4*)x)[0];
+				u32 tag = 0;
+				u64 x_can[4];
+				u64 y_can[4];
+				Copy256(x_can, x);
+				Copy256(y_can, y);
+				if (Kparams.IsGlvMode)
+					tag = CanonicalizePointGlv(x_can, y_can);
+				dst[0] = ((int4*)x_can)[0];
+				Kparams.DPTag[kang_ind * DPTABLE_MAX_CNT + ind] = tag;
 				jmp_ind |= DP_FLAG;
 			}
 
