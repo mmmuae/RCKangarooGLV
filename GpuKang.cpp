@@ -471,6 +471,16 @@ int RCGpuKang::Dbg_CheckKangs()
 	cudaError_t err = cudaMemcpy(kangs, Kparams.Kangs, kang_size, cudaMemcpyDeviceToHost);
 	int res = 0;
 	EcPoint phiG;
+	auto MultiplyPointSignedDbg = [](EcPoint& basePoint, EcInt& signedScalar) {
+		EcInt absScalar = signedScalar;
+		bool is_neg = (absScalar.data[4] >> 63) != 0;
+		if (is_neg)
+			absScalar.Neg();
+		EcPoint p = ec.Multiply(basePoint, absScalar);
+		if (is_neg)
+			p.y.NegModP();
+		return p;
+	};
 	if (gGlvMode)
 	{
 		EcInt one;
@@ -499,7 +509,7 @@ int RCGpuKang::Dbg_CheckKangs()
 			EcPoint p1 = ec.MultiplyG_Fast(k1_abs);
 			if (neg1)
 				p1.y.NegModP();
-			EcPoint p2 = ec.Multiply(phiG, k2);
+			EcPoint p2 = MultiplyPointSignedDbg(phiG, k2);
 			p = ec.AddPoints(p1, p2);
 		}
 		else
