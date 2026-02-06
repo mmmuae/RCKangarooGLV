@@ -89,6 +89,9 @@ struct DistanceEntry
         EcInt k2;
         EcInt scalar;
         EcInt orderScalar;
+        u8 glvTag;
+        u8 canonTag;
+        u8 canonInvTag;
         int type;
 };
 
@@ -116,27 +119,11 @@ struct DpMeta
 {
         EcInt k1;
         EcInt k2;
+        u8 glvTag;
+        u8 canonTag;
+        u8 canonInvTag;
         int type;
 };
-
-static constexpr u8 kTypeMask = 0x3;
-static constexpr u8 kTagShift = 2;
-static constexpr u8 kTagMask = 0x7 << kTagShift;
-
-static u8 PackTypeTag(u8 type, u8 tag)
-{
-        return (type & kTypeMask) | ((tag & 0x7) << kTagShift);
-}
-
-static u8 UnpackType(u8 packed)
-{
-        return packed & kTypeMask;
-}
-
-static u8 UnpackTag(u8 packed)
-{
-        return (packed & kTagMask) >> kTagShift;
-}
 
 static constexpr size_t kDpMetaQueueSize = 1u << 20;
 static_assert((kDpMetaQueueSize & (kDpMetaQueueSize - 1)) == 0, "kDpMetaQueueSize must be power of two");
@@ -154,13 +141,13 @@ static void InitDpMetaQueue()
         gDpMetaTail.store(0, std::memory_order_release);
 }
 
-static bool EnqueueDpMeta(const EcInt& k1, const EcInt& k2, int type)
+static bool EnqueueDpMeta(const EcInt& k1, const EcInt& k2, u8 glvTag, u8 canonTag, u8 canonInvTag, int type)
 {
         size_t head = gDpMetaHead.load(std::memory_order_relaxed);
         size_t next = (head + 1) & (kDpMetaQueueSize - 1);
         if (next == gDpMetaTail.load(std::memory_order_acquire))
                 return false;
-        gDpMetaQueue[head] = DpMeta{k1, k2, type};
+        gDpMetaQueue[head] = DpMeta{k1, k2, glvTag, canonTag, canonInvTag, type};
         gDpMetaHead.store(next, std::memory_order_release);
         return true;
 }
@@ -310,6 +297,11 @@ static void CanonicalizeGlvPairForOrdering(const EcInt& k1, const EcInt& k2, EcI
         out2 = best2;
 }
 
+static inline u8 GlvActionTag(int rot, bool neg)
+{
+        return (u8)(rot | (neg ? 0x4 : 0));
+}
+
 static void ApplyGlvTransformPair(const EcInt& k1, const EcInt& k2, int rot, bool neg, EcInt& out1, EcInt& out2)
 {
         EcInt r1, r2;
@@ -344,43 +336,100 @@ static void UncanonicalizeGlvPair(const EcInt& k1, const EcInt& k2, u8 tag, EcIn
         ApplyGlvRotation(a, b, inv_rot, out1, out2);
 }
 
-struct GlvPair
+static u8 InverseGlvTag(u8 tag)
 {
-        EcInt k1;
-        EcInt k2;
-};
+        int rot = tag & 0x3;
+        int invRot = (rot == 1) ? 2 : ((rot == 2) ? 1 : 0);
+        return GlvActionTag(invRot, (tag & 0x4) != 0);
+}
 
-static std::array<GlvPair, 6> BuildGlvTransforms(const EcInt& k1, const EcInt& k2)
+static void CanonicalizeGlvPairWithTag(const EcInt& k1, const EcInt& k2, EcInt& out1, EcInt& out2, u8& outTag, u8& outInvTag)
 {
-        std::array<GlvPair, 6> res;
-        int idx = 0;
+        EcInt best1, best2;
+        u8 bestTag = 0;
+        bool hasBest = false;
         for (int rot = 0; rot < 3; ++rot)
         {
                 for (int neg = 0; neg < 2; ++neg)
                 {
-                        ApplyGlvTransformPair(k1, k2, rot, neg != 0, res[idx].k1, res[idx].k2);
-                        ++idx;
+                        EcInt c1, c2;
+                        ApplyGlvTransformPair(k1, k2, rot, neg != 0, c1, c2);
+                        if (!hasBest || GlvLexLess(c1, c2, best1, best2))
+                        {
+                                best1 = c1;
+                                best2 = c2;
+                                bestTag = GlvActionTag(rot, neg != 0);
+                                hasBest = true;
+                        }
                 }
         }
-        return res;
+        out1 = best1;
+        out2 = best2;
+        outTag = bestTag;
+        outInvTag = InverseGlvTag(bestTag);
 }
 
-static bool TryCollisionWithTransforms(EcPoint& pnt, const EcInt& t1, const EcInt& t2, int TameType, const EcInt& w1, const EcInt& w2, int WildType)
+static bool CheckGlvClassTransformConsistencyDeterministic()
 {
-        auto tameTransforms = BuildGlvTransforms(t1, t2);
-        auto wildTransforms = BuildGlvTransforms(w1, w2);
+        if (!gGlvMode)
+                return true;
 
-        for (const auto& tame : tameTransforms)
+        constexpr int kChecks = 64;
+        constexpr u64 kSeed = 0x9B8B5F2A14D3C677ULL;
+        SetRndSeed(kSeed);
+
+        for (int i = 0; i < kChecks; ++i)
         {
-                for (const auto& wild : wildTransforms)
+                EcInt scalar;
+                scalar.RndBits(252);
+                scalar.data[0] &= 0xFFFFFFFFFFFFFFFEULL;
+
+                EcInt k1, k2;
+                ec.GlvSplitScalar(scalar, k1, k2);
+                EcInt merged = ec.CombineScalar(k1, k2);
+
+                EcInt canon1, canon2;
+                u8 canonTag = 0;
+                u8 canonInvTag = 0;
+                CanonicalizeGlvPairWithTag(k1, k2, canon1, canon2, canonTag, canonInvTag);
+
+                for (int rot = 0; rot < 3; ++rot)
                 {
-                        if (Collision_SOTA(pnt, tame.k1, tame.k2, TameType, wild.k1, wild.k2, WildType, false))
-                                return true;
-                        if (Collision_SOTA(pnt, tame.k1, tame.k2, TameType, wild.k1, wild.k2, WildType, true))
-                                return true;
+                        for (int neg = 0; neg < 2; ++neg)
+                        {
+                                EcInt t1, t2;
+                                ApplyGlvTransformPair(k1, k2, rot, neg != 0, t1, t2);
+                                EcInt mergedT = ec.CombineScalar(t1, t2);
+                                if (!mergedT.IsEqual(merged))
+                                        return false;
+
+                                EcInt cc1, cc2;
+                                u8 ctag = 0;
+                                u8 cinv = 0;
+                                CanonicalizeGlvPairWithTag(t1, t2, cc1, cc2, ctag, cinv);
+                                if (!cc1.IsEqual(canon1) || !cc2.IsEqual(canon2))
+                                        return false;
+                        }
                 }
+
+                EcInt back1, back2;
+                UncanonicalizeGlvPair(canon1, canon2, canonInvTag, back1, back2);
+                if (!back1.IsEqual(k1) || !back2.IsEqual(k2))
+                        return false;
+
+                EcInt neg1 = k1;
+                EcInt neg2 = k2;
+                neg1.Neg();
+                neg2.Neg();
+                EcInt negCanon1, negCanon2;
+                u8 negTag = 0;
+                u8 negInvTag = 0;
+                CanonicalizeGlvPairWithTag(neg1, neg2, negCanon1, negCanon2, negTag, negInvTag);
+                if (!negCanon1.IsEqual(canon1) || !negCanon2.IsEqual(canon2))
+                        return false;
         }
-        return false;
+
+        return true;
 }
 
 static EcInt CombineScalarDistanceForOrdering(const EcInt& k1, const EcInt& k2)
@@ -687,6 +736,19 @@ static void ConsiderGapWithSet(const DistanceEntry& entry, const std::multiset<D
         }
 }
 
+static bool TryCollisionNormalized(EcPoint& pnt,
+                                   const EcInt& t1,
+                                   const EcInt& t2,
+                                   int TameType,
+                                   const EcInt& w1,
+                                   const EcInt& w2,
+                                   int WildType)
+{
+        if (Collision_SOTA(pnt, t1, t2, TameType, w1, w2, WildType, false))
+                return true;
+        return Collision_SOTA(pnt, t1, t2, TameType, w1, w2, WildType, true);
+}
+
 static void ProcessDpMeta(const DpMeta& meta)
 {
         if (gGenMode)
@@ -699,7 +761,14 @@ static void ProcessDpMeta(const DpMeta& meta)
         else if (meta.type == WILD2)
                 gWild2Count.fetch_add(1, std::memory_order_relaxed);
 
-        DistanceEntry entry{meta.k1, meta.k2, CombineScalarDistance(meta.k1, meta.k2), CombineScalarDistanceForOrdering(meta.k1, meta.k2), meta.type};
+        DistanceEntry entry{meta.k1,
+                            meta.k2,
+                            CombineScalarDistance(meta.k1, meta.k2),
+                            CombineScalarDistanceForOrdering(meta.k1, meta.k2),
+                            meta.glvTag,
+                            meta.canonTag,
+                            meta.canonInvTag,
+                            meta.type};
         if (meta.type == TAME)
         {
                 gTameDistances.insert(entry);
@@ -756,8 +825,12 @@ struct DBRec
 	u8 d1[16];
 	u8 d2[16];
 	u8 type; //0 - tame, 1 - wild1, 2 - wild2
+	u8 glvTag;
+	u8 canonTag;
+	u8 canonInvTag;
 };
 #pragma pack(pop)
+static_assert(sizeof(DBRec) == 48, "DBRec size must remain in sync with DB_REC_LEN in utils.cpp");
 
 void InitGpus()
 {
@@ -914,10 +987,10 @@ void CheckNewPoints()
                 memcpy(nrec.d2, p + 32, 16);
 		u8 type = gGenMode ? TAME : p[48];
 		u8 tag = gGlvCanonicalWalk ? (p[52] & 0x7) : 0;
-		nrec.type = PackTypeTag(type, tag);
-
-		u8 nrecType = UnpackType(nrec.type);
-		u8 nrecTag = UnpackTag(nrec.type);
+		nrec.type = type;
+		nrec.glvTag = tag;
+		nrec.canonTag = 0;
+		nrec.canonInvTag = 0;
 
                 EcInt k1;
                 EcInt k2;
@@ -932,8 +1005,20 @@ void CheckNewPoints()
                         k2.SetZero();
                 }
 
+		if (gGlvMode)
+		{
+			EcInt c1, c2;
+			CanonicalizeGlvPairWithTag(k1, k2, c1, c2, nrec.canonTag, nrec.canonInvTag);
+			k1 = c1;
+			k2 = c2;
+			SerializeDistance128(nrec.d1, k1);
+			SerializeDistance128(nrec.d2, k2);
+		}
+
+		u8 nrecType = nrec.type;
+
 		if (!gGenMode)
-			EnqueueDpMeta(k1, k2, nrecType);
+			EnqueueDpMeta(k1, k2, nrec.glvTag, nrec.canonTag, nrec.canonInvTag, nrecType);
 
                 DBRec* pref = (DBRec*)db.FindOrAddDataBlock((u8*)&nrec);
                 if (gGenMode)
@@ -946,8 +1031,7 @@ void CheckNewPoints()
 			memcpy(((u8*)&tmp_pref) + 3, pref, sizeof(DBRec) - 3);
 			pref = &tmp_pref;
 
-		u8 prefType = UnpackType(pref->type);
-		u8 prefTag = UnpackTag(pref->type);
+		u8 prefType = pref->type;
 		if (prefType == nrecType)
 		{
 			if (prefType == TAME)
@@ -975,16 +1059,6 @@ void CheckNewPoints()
 				t1 = DeserializeDistance256(nrec.d1);
 				t2.SetZero();
 			}
-			if (gGlvCanonicalWalk)
-			{
-				EcInt tw1, tw2, tt1, tt2;
-				UncanonicalizeGlvPair(w1, w2, prefTag, tw1, tw2);
-				UncanonicalizeGlvPair(t1, t2, nrecTag, tt1, tt2);
-				w1 = tw1;
-				w2 = tw2;
-				t1 = tt1;
-				t2 = tt2;
-			}
 			TameType = nrecType;
 			WildType = prefType;
 		}
@@ -1001,31 +1075,13 @@ void CheckNewPoints()
 				t1 = DeserializeDistance256(pref->d1);
 				t2.SetZero();
 			}
-			if (gGlvCanonicalWalk)
-			{
-				EcInt tw1, tw2, tt1, tt2;
-				UncanonicalizeGlvPair(w1, w2, nrecTag, tw1, tw2);
-				UncanonicalizeGlvPair(t1, t2, prefTag, tt1, tt2);
-				w1 = tw1;
-				w2 = tw2;
-				t1 = tt1;
-				t2 = tt2;
-			}
 			TameType = TAME;
 			WildType = nrecType;
 		}
 
 			// Verify if this is a collision (matching X coordinate)
 			bool res = false;
-			if (gGlvCanonicalWalk)
-			{
-				res = TryCollisionWithTransforms(gPntToSolve, t1, t2, TameType, w1, w2, WildType);
-			}
-			else
-			{
-				res = Collision_SOTA(gPntToSolve, t1, t2, TameType, w1, w2, WildType, false);
-				res = res || Collision_SOTA(gPntToSolve, t1, t2, TameType, w1, w2, WildType, true);
-			}
+			res = TryCollisionNormalized(gPntToSolve, t1, t2, TameType, w1, w2, WildType);
 			if (!res)
 			{
 				bool w12 = ((prefType == WILD1) && (nrecType == WILD2)) || ((prefType == WILD2) && (nrecType == WILD1));
@@ -1177,6 +1233,11 @@ bool SolvePoint(EcPoint PntToSolve, EcInt& RangeWidth, int RangeBits, int DP, Ec
                 if (!CheckGlvCombineJumpInvariantDeterministic())
                 {
                         printf("GLV invariant check failed: CombineJumpPoint(k1,k2) != G*CombineScalar(k1,k2).\r\n");
+                        return false;
+                }
+                if (!CheckGlvClassTransformConsistencyDeterministic())
+                {
+                        printf("GLV class transform consistency check failed.\r\n");
                         return false;
                 }
         }

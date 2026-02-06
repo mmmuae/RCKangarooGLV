@@ -801,8 +801,8 @@ __device__ __forceinline__ void KernelBBody(const TKparams& Kparams)
 		#pragma unroll
 		for (int i = 0; i < MD_LEN; i++)
 		{
-			RegsA[i] = Kparams.LoopTable[MD_LEN * BLOCK_SIZE * PNT_GROUP_CNT * BLOCK_X + 2 * MD_LEN * BLOCK_SIZE * gr_ind2 + i * BLOCK_SIZE + BLOCK_X];
-			RegsB[i] = Kparams.LoopTable[MD_LEN * BLOCK_SIZE * PNT_GROUP_CNT * BLOCK_X + 2 * MD_LEN * BLOCK_SIZE * gr_ind2 + (i + MD_LEN) * BLOCK_SIZE + BLOCK_X];
+			RegsA[i] = Kparams.LoopTable[MD_LEN * BLOCK_SIZE * PNT_GROUP_CNT * BLOCK_X + 2 * MD_LEN * BLOCK_SIZE * gr_ind2 + i * BLOCK_SIZE + THREAD_X];
+			RegsB[i] = Kparams.LoopTable[MD_LEN * BLOCK_SIZE * PNT_GROUP_CNT * BLOCK_X + 2 * MD_LEN * BLOCK_SIZE * gr_ind2 + (i + MD_LEN) * BLOCK_SIZE + THREAD_X];
 		}
 		u32 cur_indA = 0;
 		u32 cur_indB = 0;
@@ -861,9 +861,9 @@ __device__ __forceinline__ void KernelBBody(const TKparams& Kparams)
 		for (int i = 0; i < MD_LEN; i++)
 		{
 			int ind = (i + MD_LEN - cur_indA) % MD_LEN;
-			Kparams.LoopTable[MD_LEN * BLOCK_SIZE * PNT_GROUP_CNT * BLOCK_X + 2 * MD_LEN * BLOCK_SIZE * gr_ind2 + ind * BLOCK_SIZE + BLOCK_X] = RegsA[i];
+			Kparams.LoopTable[MD_LEN * BLOCK_SIZE * PNT_GROUP_CNT * BLOCK_X + 2 * MD_LEN * BLOCK_SIZE * gr_ind2 + ind * BLOCK_SIZE + THREAD_X] = RegsA[i];
 			ind = (i + MD_LEN - cur_indB) % MD_LEN;
-			Kparams.LoopTable[MD_LEN * BLOCK_SIZE * PNT_GROUP_CNT * BLOCK_X + 2 * MD_LEN * BLOCK_SIZE * gr_ind2 + (ind + MD_LEN) * BLOCK_SIZE + BLOCK_X] = RegsB[i];
+			Kparams.LoopTable[MD_LEN * BLOCK_SIZE * PNT_GROUP_CNT * BLOCK_X + 2 * MD_LEN * BLOCK_SIZE * gr_ind2 + (ind + MD_LEN) * BLOCK_SIZE + THREAD_X] = RegsB[i];
 		}
 	}
 }
@@ -879,6 +879,52 @@ __global__ void KernelB_NoGlv(const TKparams Kparams)
 {
 	KernelBBody<false>(Kparams);
 }
+
+#ifdef DEBUG_MODE
+__global__ void KernelBDebugReplayDiag(const TKparams Kparams, u32* outErr, bool glvMode)
+{
+	if (blockIdx.x != 0 || threadIdx.x != 0)
+		return;
+
+	const u32 base = 0;
+	u64 dGpu[4] = {
+		Kparams.Kangs[base * 12 + 8],
+		Kparams.Kangs[base * 12 + 9],
+		Kparams.Kangs[base * 12 + 10],
+		Kparams.Kangs[base * 12 + 11]
+	};
+	u64 dCpu[4] = {dGpu[0], dGpu[1], dGpu[2], dGpu[3]};
+
+	u32* jlist = Kparams.JumpsList;
+	u32* jtaglist = Kparams.JumpsTag;
+	for (u32 step = 0; step < 8 && step < STEP_CNT; ++step)
+	{
+		u32 packed = jlist[step * BLOCK_SIZE * PNT_GROUP_CNT / 2];
+		u32 packedTag = jtaglist[step * BLOCK_SIZE * PNT_GROUP_CNT / 2];
+		u16 j = packed & 0xFFFF;
+		u16 tag = packedTag & 0xFFFF;
+		u32 ind = j & JMP_MASK;
+		Add256to256(dGpu, &Kparams.Jumps1[12 * ind + 8]);
+		Add256to256(dCpu, &Kparams.Jumps1[12 * ind + 8]);
+		if ((j & JMP2_FLAG) != 0)
+		{
+			Add256to256(dGpu, &Kparams.Jumps2[12 * ind + 8]);
+			Add256to256(dCpu, &Kparams.Jumps2[12 * ind + 8]);
+		}
+		if (glvMode && tag)
+		{
+			CanonicalizeDistanceGlv(dGpu, dGpu + 2, tag);
+			CanonicalizeDistanceGlv(dCpu, dCpu + 2, tag);
+		}
+	}
+
+	u32 err = 0;
+	for (int i = 0; i < 4; ++i)
+		if (dGpu[i] != dCpu[i])
+			err = 1;
+	*outErr = err;
+}
+#endif
 
 //this kernel performes single jump3 for looped kangs
 template <bool kGlvMode>
@@ -1292,3 +1338,21 @@ cudaError_t cuSetGpuParams(TKparams Kparams, u64* _jmp2_table)
 		return err;
 	return cudaSuccess;
 }
+
+
+#ifdef DEBUG_MODE
+bool CallGpuKernelBDebugReplay(TKparams Kparams)
+{
+	u32* dErr = nullptr;
+	u32 hErr = 0;
+	if (cudaMalloc((void**)&dErr, sizeof(u32)) != cudaSuccess)
+		return false;
+	cudaMemset(dErr, 0, sizeof(u32));
+	KernelBDebugReplayDiag<<<1, 1>>>(Kparams, dErr, Kparams.IsGlvMode);
+	cudaError_t err = cudaMemcpy(&hErr, dErr, sizeof(u32), cudaMemcpyDeviceToHost);
+	cudaFree(dErr);
+	if (err != cudaSuccess)
+		return false;
+	return hErr == 0;
+}
+#endif
