@@ -15,6 +15,9 @@ cudaError_t cuSetGpuParams(TKparams Kparams, u64* _jmp2_table);
 void CallGpuKernelGen(TKparams Kparams);
 void CallGpuKernelABC(TKparams Kparams);
 void AddPointsToList(u32* data, int cnt, u64 ops_cnt);
+#ifdef DEBUG_MODE
+bool CallGpuKernelBDebugReplay(TKparams Kparams);
+#endif
 extern bool gGenMode; //tames generation mode
 extern bool gGlvMode;
 
@@ -555,6 +558,13 @@ void RCGpuKang::Execute()
 		cudaMemset(Kparams.DPTable, 0, KangCnt * sizeof(u32));
 		cudaMemset(Kparams.LoopedKangs, 0, 8);
 		CallGpuKernelABC(Kparams);
+#ifdef DEBUG_MODE
+		if (!CallGpuKernelBDebugReplay(Kparams))
+		{
+			printf("GPU %d KernelB replay diagnostic failed (IsGlvMode=%d)\n", CudaIndex, Kparams.IsGlvMode ? 1 : 0);
+			gTotalErrors++;
+		}
+#endif
 		int cnt;
 		err = cudaMemcpy(&cnt, Kparams.DPs_out, 4, cudaMemcpyDeviceToHost);
 		if (err != cudaSuccess)
