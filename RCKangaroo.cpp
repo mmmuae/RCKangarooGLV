@@ -188,6 +188,12 @@ static EcInt DeserializeDistance128(const u8* dist)
         return res;
 }
 
+// Serialize EcInt distance into 16-byte DP representation
+static void SerializeDistance128(u8* dist, const EcInt& val)
+{
+        memcpy(dist, val.data, 16);
+}
+
 // Deserialize 32-byte DP distance into EcInt with sign extension if needed
 static EcInt DeserializeDistance256(const u8* dist)
 {
