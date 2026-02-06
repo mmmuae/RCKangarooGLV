@@ -73,6 +73,7 @@ public:
 	static EcInt CalcY(EcInt& x, bool is_even);
 	static bool IsValidPoint(EcPoint& pnt);
 	static EcPoint Endomorphism(EcPoint& pnt);
+	static EcInt GetGlvLambda();
 	static void GlvSplitScalar(EcInt& k, EcInt& k1, EcInt& k2);
 	static EcInt CombineScalar(EcInt& k1, EcInt& k2);
 };

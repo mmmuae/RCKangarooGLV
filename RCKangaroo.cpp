@@ -514,6 +514,28 @@ static bool CheckGlvCombineJumpInvariantDeterministic()
         return true;
 }
 
+static bool InitializeGlvPhiG()
+{
+        EcInt one;
+        one.Set(1);
+        EcPoint base = ec.MultiplyG(one);
+
+        EcPoint phiFromEndomorphism = ec.Endomorphism(base);
+        EcInt lambda = ec.GetGlvLambda();
+        EcPoint phiFromLambda = ec.MultiplyG(lambda);
+
+        if (phiFromEndomorphism.IsEqual(phiFromLambda))
+        {
+                gPhiG = phiFromEndomorphism;
+                return true;
+        }
+
+        // Scalar decomposition and recombination rely on lambda. If beta/lambda constants
+        // drift out of sync, prefer lambda-derived phi(G) so CombineJumpPoint remains correct.
+        gPhiG = phiFromLambda;
+        return true;
+}
+
 // Normalize a candidate key so it always falls inside the configured search range
 static EcInt NormalizeKeyToRange(const EcInt& cand)
 {
@@ -1232,10 +1254,11 @@ bool SolvePoint(EcPoint PntToSolve, EcInt& RangeWidth, int RangeBits, int DP, Ec
 
         if (gGlvMode)
         {
-                EcInt one;
-                one.Set(1);
-                EcPoint base = ec.MultiplyG(one);
-                gPhiG = ec.Endomorphism(base);
+                if (!InitializeGlvPhiG())
+                {
+                        printf("GLV initialization failed.\r\n");
+                        return false;
+                }
                 if (!CheckGlvCombineJumpInvariantDeterministic())
                 {
                         printf("GLV invariant check failed: CombineJumpPoint(k1,k2) != G*CombineScalar(k1,k2).\r\n");
