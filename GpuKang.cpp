@@ -486,9 +486,8 @@ int RCGpuKang::Dbg_CheckKangs()
 	};
 	if (gGlvMode)
 	{
-		EcInt one;
-		one.Set(1);
-		phiG = ec.Endomorphism(ec.MultiplyG(one));
+		EcInt lambda = ec.GetGlvLambda();
+		phiG = ec.MultiplyG(lambda);
 	}
 	for (int i = 0; i < KangCnt; i++)
 	{
