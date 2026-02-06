@@ -392,30 +392,71 @@ static EcInt CombineScalarDistanceForOrdering(const EcInt& k1, const EcInt& k2)
         return ec.CombineScalar(c1, c2);
 }
 
+static EcPoint MultiplyPointSigned(EcPoint& basePoint, EcInt& signedScalar)
+{
+        EcInt absScalar = signedScalar;
+        bool is_neg = (absScalar.data[4] >> 63) != 0;
+        if (is_neg)
+                absScalar.Neg();
+        EcPoint p = ec.Multiply(basePoint, absScalar);
+        if (is_neg)
+                p.y.NegModP();
+        return p;
+}
+
+static EcPoint MultiplyGSigned(EcInt& signedScalar)
+{
+        EcInt absScalar = signedScalar;
+        bool is_neg = (absScalar.data[4] >> 63) != 0;
+        if (is_neg)
+                absScalar.Neg();
+        EcPoint p = ec.MultiplyG(absScalar);
+        if (is_neg)
+                p.y.NegModP();
+        return p;
+}
+
 static EcPoint CombineJumpPoint(EcInt& k1, EcInt& k2)
 {
         if (!gGlvMode)
                 return ec.MultiplyG(k1);
 
-        auto MultiplyG_Signed = [](EcInt& k) {
-                EcInt kk = k;
-                bool is_neg = (kk.data[4] >> 63) != 0;
-                if (is_neg)
-                        kk.Neg();
-                EcPoint p = ec.MultiplyG(kk);
-                if (is_neg)
-                        p.y.NegModP();
-                return p;
-        };
-
         if (k1.IsZero())
-                return ec.Multiply(gPhiG, k2);
+                return MultiplyPointSigned(gPhiG, k2);
         if (k2.IsZero())
-                return MultiplyG_Signed(k1);
+                return MultiplyGSigned(k1);
 
-        EcPoint p1 = MultiplyG_Signed(k1);
-        EcPoint p2 = ec.Multiply(gPhiG, k2);
+        EcPoint p1 = MultiplyGSigned(k1);
+        EcPoint p2 = MultiplyPointSigned(gPhiG, k2);
         return ec.AddPoints(p1, p2);
+}
+
+static bool CheckGlvCombineJumpInvariantDeterministic()
+{
+        if (!gGlvMode)
+                return true;
+
+        constexpr int kChecks = 64;
+        constexpr u64 kSeed = 0x3A5F9D1C7B42E961ULL;
+        SetRndSeed(kSeed);
+
+        for (int i = 0; i < kChecks; ++i)
+        {
+                EcInt scalar;
+                scalar.RndBits(252);
+                scalar.data[0] &= 0xFFFFFFFFFFFFFFFEULL;
+
+                EcInt k1, k2;
+                ec.GlvSplitScalar(scalar, k1, k2);
+
+                EcPoint combined = CombineJumpPoint(k1, k2);
+                EcInt mergedScalar = ec.CombineScalar(k1, k2);
+                EcPoint direct = ec.MultiplyG(mergedScalar);
+
+                if (!combined.IsEqual(direct))
+                        return false;
+        }
+        return true;
 }
 
 // Normalize a candidate key so it always falls inside the configured search range
@@ -1133,6 +1174,11 @@ bool SolvePoint(EcPoint PntToSolve, EcInt& RangeWidth, int RangeBits, int DP, Ec
                 one.Set(1);
                 EcPoint base = ec.MultiplyG(one);
                 gPhiG = ec.Endomorphism(base);
+                if (!CheckGlvCombineJumpInvariantDeterministic())
+                {
+                        printf("GLV invariant check failed: CombineJumpPoint(k1,k2) != G*CombineScalar(k1,k2).\r\n");
+                        return false;
+                }
         }
         double base_ops = 1.15 * pow(2.0, RangeBits / 2.0);
         double ops = gGlvMode ? (base_ops / 6.0) : base_ops;
