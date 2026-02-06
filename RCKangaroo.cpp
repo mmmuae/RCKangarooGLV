@@ -476,13 +476,21 @@ static EcPoint CombineJumpPoint(EcInt& k1, EcInt& k2)
         if (!gGlvMode)
                 return ec.MultiplyG(k1);
 
+        // Build the phi(k2*G) branch through generator multiplication first and then
+        // apply endomorphism directly to the resulting point. This keeps the jump
+        // composition strictly tied to the same endomorphism constants used by
+        // scalar-domain combine logic and avoids any drift from auxiliary phi(G)
+        // cache state or arbitrary-point multiplication edge cases.
+        EcPoint p2 = MultiplyGSigned(k2);
+        p2 = ec.Endomorphism(p2);
+
         if (k1.IsZero())
-                return MultiplyPointSigned(gPhiG, k2);
-        if (k2.IsZero())
-                return MultiplyGSigned(k1);
+                return p2;
 
         EcPoint p1 = MultiplyGSigned(k1);
-        EcPoint p2 = MultiplyPointSigned(gPhiG, k2);
+        if (k2.IsZero())
+                return p1;
+
         return ec.AddPoints(p1, p2);
 }
 
