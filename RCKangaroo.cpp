@@ -257,20 +257,31 @@ static void ApplyGlvRotation(const EcInt& k1, const EcInt& k2, int rot, EcInt& o
                 return;
         }
 
-        EcInt sum = k1;
-        EcInt k2c = k2;
-        sum.Add(k2c);
-        sum.Neg();
+        // The secp256k1 endomorphism phi maps P=(x,y) to (beta*x, y),
+        // corresponding to scalar multiplication by lambda where
+        // lambda^2 + lambda + 1 = 0 (mod n).
+        //
+        // For a point with decomposition (k1, k2) s.t. scalar = k1 + lambda*k2:
+        //   phi   (rot=1): lambda*s = -k2 + (k1-k2)*lambda  => (-k2, k1-k2)
+        //   phi^2 (rot=2): lambda^2*s = (k2-k1) + (-k1)*lambda => (k2-k1, -k1)
 
         if (rot == 1)
         {
+                // phi: (k1, k2) -> (-k2, k1 - k2)
                 out1 = k2;
-                out2 = sum;
+                out1.Neg();
+                out2 = k1;
+                EcInt k2c = k2;
+                out2.Sub(k2c);
         }
         else
         {
-                out1 = sum;
+                // phi^2: (k1, k2) -> (k2 - k1, -k1)
+                out1 = k2;
+                EcInt k1c = k1;
+                out1.Sub(k1c);
                 out2 = k1;
+                out2.Neg();
         }
 }
 
@@ -399,6 +410,15 @@ static bool CheckGlvClassTransformConsistencyDeterministic()
                 u8 canonInvTag = 0;
                 CanonicalizeGlvPairWithTag(k1, k2, canon1, canon2, canonTag, canonInvTag);
 
+                // Precompute lambda powers of merged: lambdaPow[r] = lambda^r * merged mod n
+                // CombineScalar(0, x) = 0 + lambda*x = lambda*x mod n
+                EcInt zero;
+                zero.SetZero();
+                EcInt lambdaPow[3];
+                lambdaPow[0] = merged;
+                lambdaPow[1] = ec.CombineScalar(zero, merged);
+                lambdaPow[2] = ec.CombineScalar(zero, lambdaPow[1]);
+
                 for (int rot = 0; rot < 3; ++rot)
                 {
                         for (int neg = 0; neg < 2; ++neg)
@@ -406,9 +426,23 @@ static bool CheckGlvClassTransformConsistencyDeterministic()
                                 EcInt t1, t2;
                                 ApplyGlvTransformPair(k1, k2, rot, neg != 0, t1, t2);
                                 EcInt mergedT = ec.CombineScalar(t1, t2);
-                                if (!mergedT.IsEqual(merged))
+
+                                // The endomorphism identity requires:
+                                //   CombineScalar(rot_r(k1,k2)) == lambda^r * merged mod n
+                                // with sign flip for negation.
+                                EcInt expected = lambdaPow[rot];
+                                if (neg)
+                                {
+                                        // Negate mod n: CombineScalar(-x, 0) = NormalizeToModN(-x)
+                                        EcInt neg_exp = expected;
+                                        neg_exp.Neg();
+                                        expected = ec.CombineScalar(neg_exp, zero);
+                                }
+
+                                if (!mergedT.IsEqual(expected))
                                         return false;
 
+                                // All rotations of (k1, k2) must yield the same canonical form
                                 EcInt cc1, cc2;
                                 u8 ctag = 0;
                                 u8 cinv = 0;

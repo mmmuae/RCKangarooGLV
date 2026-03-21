@@ -62,32 +62,38 @@ __device__ __forceinline__ void Neg128(u64* val)
 
 __device__ __forceinline__ void CanonicalizeDistanceGlv(u64* k1, u64* k2, u32 tag)
 {
+	// The secp256k1 endomorphism phi maps P=(x,y) to (beta*x, y),
+	// corresponding to scalar multiplication by lambda where
+	// lambda^2 + lambda + 1 = 0 (mod n).
+	//
+	// For a point with decomposition (k1, k2) s.t. scalar = k1 + lambda*k2:
+	//   phi   (rot=1): lambda*s = -k2 + (k1-k2)*lambda  => (-k2, k1-k2)
+	//   phi^2 (rot=2): lambda^2*s = (k2-k1) + (-k1)*lambda => (k2-k1, -k1)
+
 	u32 rot = tag & 0x3;
 	bool neg = (tag & 0x4) != 0;
 	u64 a[2] = {k1[0], k1[1]};
 	u64 b[2] = {k2[0], k2[1]};
-	u64 sum[2];
 
-	if (rot != 0)
+	if (rot == 1)
 	{
-		sum[0] = a[0];
-		sum[1] = a[1];
-		Add128to128(sum, b);
-		Neg128(sum);
-		if (rot == 1)
-		{
-			a[0] = b[0];
-			a[1] = b[1];
-			b[0] = sum[0];
-			b[1] = sum[1];
-		}
-		else
-		{
-			b[0] = a[0];
-			b[1] = a[1];
-			a[0] = sum[0];
-			a[1] = sum[1];
-		}
+		// phi: (k1, k2) -> (-k2, k1 - k2)
+		u64 new_a[2] = {b[0], b[1]};
+		Neg128(new_a);               // new_a = -k2
+		u64 new_b[2] = {a[0], a[1]};
+		Sub128from128(new_b, b);     // new_b = k1 - k2
+		a[0] = new_a[0]; a[1] = new_a[1];
+		b[0] = new_b[0]; b[1] = new_b[1];
+	}
+	else if (rot == 2)
+	{
+		// phi^2: (k1, k2) -> (k2 - k1, -k1)
+		u64 new_a[2] = {b[0], b[1]};
+		Sub128from128(new_a, a);     // new_a = k2 - k1
+		u64 new_b[2] = {a[0], a[1]};
+		Neg128(new_b);               // new_b = -k1
+		a[0] = new_a[0]; a[1] = new_a[1];
+		b[0] = new_b[0]; b[1] = new_b[1];
 	}
 
 	if (neg)
