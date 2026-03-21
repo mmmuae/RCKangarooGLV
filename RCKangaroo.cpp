@@ -1025,6 +1025,8 @@ bool Collision_SOTA(EcPoint& pnt, EcInt t1, EcInt t2, int TameType, EcInt w1, Ec
 
 		int rotations = gGlvMode ? 3 : 1;
 		EcInt rotated = diff;
+		EcInt zero;
+		zero.SetZero();
 		for (int r = 0; r < rotations; r++)
 		{
 			// Try positive: key = rotated_diff + HalfRange
@@ -1042,11 +1044,7 @@ bool Collision_SOTA(EcPoint& pnt, EcInt t1, EcInt t2, int TameType, EcInt w1, Ec
 
 			// Compute next lambda rotation: rotated = lambda * rotated
 			if (r + 1 < rotations)
-			{
-				EcInt zero;
-				zero.SetZero();
 				rotated = ec.CombineScalar(zero, rotated);
-			}
 		}
 		return false;
 	}
@@ -1062,6 +1060,8 @@ bool Collision_SOTA(EcPoint& pnt, EcInt t1, EcInt t2, int TameType, EcInt w1, Ec
 
 		int rotations = gGlvMode ? 3 : 1;
 		EcInt rotated = diff;
+		EcInt zero;
+		zero.SetZero();
 		for (int r = 0; r < rotations; r++)
 		{
 			EcInt candidate = rotated;
@@ -1076,11 +1076,7 @@ bool Collision_SOTA(EcPoint& pnt, EcInt t1, EcInt t2, int TameType, EcInt w1, Ec
 				return true;
 
 			if (r + 1 < rotations)
-			{
-				EcInt zero;
-				zero.SetZero();
 				rotated = ec.CombineScalar(zero, rotated);
-			}
 		}
 		return false;
 	}
