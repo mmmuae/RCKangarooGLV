@@ -990,44 +990,99 @@ void AddPointsToList(u32* data, int pnt_cnt, u64 ops_cnt)
 	csAddPoints.Leave();
 }
 
+// Helper: try a single candidate key and verify against the target public key.
+// Returns true if the candidate matches.
+static bool TryCandidate(EcPoint& pnt, EcInt& candidate)
+{
+	gPrivKey = candidate;
+	EcPoint P = ec.MultiplyG(gPrivKey);
+	return P.IsEqual(pnt);
+}
+
 bool Collision_SOTA(EcPoint& pnt, EcInt t1, EcInt t2, int TameType, EcInt w1, EcInt w2, int WildType, bool IsNeg)
 {
 	EcInt t = CombineScalarDistance(t1, t2);
 	EcInt w = CombineScalarDistance(w1, w2);
 	if (IsNeg)
 		t.Neg();
+
+	EcInt diff = t;
+	diff.Sub(w);
+
 	if (TameType == TAME)
 	{
-		gPrivKey = t;
-		gPrivKey.Sub(w);
-		EcInt sv = gPrivKey;
-		gPrivKey.Add(Int_HalfRange);
-		EcPoint P = ec.MultiplyG(gPrivKey);
-		if (P.IsEqual(pnt))
-			return true;
-		gPrivKey = sv;
-		gPrivKey.Neg();
-		gPrivKey.Add(Int_HalfRange);
-		P = ec.MultiplyG(gPrivKey);
-		return P.IsEqual(pnt);
+		// In GLV mode, the wild offset accumulates endomorphism rotations
+		// during canonical walk. The collision equation is:
+		//   D_tame - D_wild = lambda^R * (key - HalfRange)
+		// where R is the unknown accumulated rotation (0, 1, or 2).
+		// We must try all 3 lambda powers (and their negations).
+		//
+		// lambda^0 * diff = diff
+		// lambda^1 * diff = CombineScalar(0, diff) (since CombineScalar(0, x) = lambda*x mod n)
+		// lambda^2 * diff = CombineScalar(0, lambda*diff)
+		//
+		// In non-GLV mode, R=0 always, so only diff and -diff are tried.
+
+		int rotations = gGlvMode ? 3 : 1;
+		EcInt rotated = diff;
+		for (int r = 0; r < rotations; r++)
+		{
+			// Try positive: key = rotated_diff + HalfRange
+			EcInt candidate = rotated;
+			candidate.Add(Int_HalfRange);
+			if (TryCandidate(pnt, candidate))
+				return true;
+
+			// Try negative: key = -rotated_diff + HalfRange
+			candidate = rotated;
+			candidate.Neg();
+			candidate.Add(Int_HalfRange);
+			if (TryCandidate(pnt, candidate))
+				return true;
+
+			// Compute next lambda rotation: rotated = lambda * rotated
+			if (r + 1 < rotations)
+			{
+				EcInt zero;
+				zero.SetZero();
+				rotated = ec.CombineScalar(zero, rotated);
+			}
+		}
+		return false;
 	}
 	else
 	{
-		gPrivKey = t;
-		gPrivKey.Sub(w);
-		if (gPrivKey.data[4] >> 63)
-			gPrivKey.Neg();
-		gPrivKey.ShiftRight(1);
-		EcInt sv = gPrivKey;
-		gPrivKey.Add(Int_HalfRange);
-		EcPoint P = ec.MultiplyG(gPrivKey);
-		if (P.IsEqual(pnt))
-			return true;
-		gPrivKey = sv;
-		gPrivKey.Neg();
-		gPrivKey.Add(Int_HalfRange);
-		P = ec.MultiplyG(gPrivKey);
-		return P.IsEqual(pnt);
+		// Wild-wild collision: offsets are PntA and PntB = -PntA
+		// Same lambda-rotation issue applies.
+		// The factor is (lambda^B1 + lambda^B2) which for the case where
+		// both are same type simplifies, but we still need to try rotations.
+		if (diff.data[4] >> 63)
+			diff.Neg();
+		diff.ShiftRight(1);
+
+		int rotations = gGlvMode ? 3 : 1;
+		EcInt rotated = diff;
+		for (int r = 0; r < rotations; r++)
+		{
+			EcInt candidate = rotated;
+			candidate.Add(Int_HalfRange);
+			if (TryCandidate(pnt, candidate))
+				return true;
+
+			candidate = rotated;
+			candidate.Neg();
+			candidate.Add(Int_HalfRange);
+			if (TryCandidate(pnt, candidate))
+				return true;
+
+			if (r + 1 < rotations)
+			{
+				EcInt zero;
+				zero.SetZero();
+				rotated = ec.CombineScalar(zero, rotated);
+			}
+		}
+		return false;
 	}
 }
 
@@ -1131,6 +1186,20 @@ void CheckNewPoints()
 			}
 			TameType = nrecType;
 			WildType = prefType;
+
+			// In GLV mode, the DB stores CPU-canonicalized distances.
+			// Each DP's distance was independently rotated by CanonicalizeGlvPairWithTag
+			// (multiplying the combined scalar by a different lambda^S factor).
+			// We must undo this to recover the GPU-rotated distances, which maintain
+			// the correct arithmetic relationship needed for key recovery.
+			if (gGlvMode)
+			{
+				EcInt uw1, uw2, ut1, ut2;
+				UncanonicalizeGlvPair(w1, w2, pref->canonInvTag, uw1, uw2);
+				UncanonicalizeGlvPair(t1, t2, nrec.canonInvTag, ut1, ut2);
+				w1 = uw1; w2 = uw2;
+				t1 = ut1; t2 = ut2;
+			}
 		}
 		else
 		{
@@ -1147,6 +1216,15 @@ void CheckNewPoints()
 			}
 			TameType = TAME;
 			WildType = nrecType;
+
+			if (gGlvMode)
+			{
+				EcInt uw1, uw2, ut1, ut2;
+				UncanonicalizeGlvPair(w1, w2, nrec.canonInvTag, uw1, uw2);
+				UncanonicalizeGlvPair(t1, t2, pref->canonInvTag, ut1, ut2);
+				w1 = uw1; w2 = uw2;
+				t1 = ut1; t2 = ut2;
+			}
 		}
 
 			// Verify if this is a collision (matching X coordinate)
