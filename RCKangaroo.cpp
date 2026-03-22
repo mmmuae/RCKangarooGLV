@@ -257,20 +257,31 @@ static void ApplyGlvRotation(const EcInt& k1, const EcInt& k2, int rot, EcInt& o
                 return;
         }
 
-        EcInt sum = k1;
-        EcInt k2c = k2;
-        sum.Add(k2c);
-        sum.Neg();
+        // The secp256k1 endomorphism phi maps P=(x,y) to (beta*x, y),
+        // corresponding to scalar multiplication by lambda where
+        // lambda^2 + lambda + 1 = 0 (mod n).
+        //
+        // For a point with decomposition (k1, k2) s.t. scalar = k1 + lambda*k2:
+        //   phi   (rot=1): lambda*s = -k2 + (k1-k2)*lambda  => (-k2, k1-k2)
+        //   phi^2 (rot=2): lambda^2*s = (k2-k1) + (-k1)*lambda => (k2-k1, -k1)
 
         if (rot == 1)
         {
+                // phi: (k1, k2) -> (-k2, k1 - k2)
                 out1 = k2;
-                out2 = sum;
+                out1.Neg();
+                out2 = k1;
+                EcInt k2c = k2;
+                out2.Sub(k2c);
         }
         else
         {
-                out1 = sum;
+                // phi^2: (k1, k2) -> (k2 - k1, -k1)
+                out1 = k2;
+                EcInt k1c = k1;
+                out1.Sub(k1c);
                 out2 = k1;
+                out2.Neg();
         }
 }
 
@@ -399,6 +410,15 @@ static bool CheckGlvClassTransformConsistencyDeterministic()
                 u8 canonInvTag = 0;
                 CanonicalizeGlvPairWithTag(k1, k2, canon1, canon2, canonTag, canonInvTag);
 
+                // Precompute lambda powers of merged: lambdaPow[r] = lambda^r * merged mod n
+                // CombineScalar(0, x) = 0 + lambda*x = lambda*x mod n
+                EcInt zero;
+                zero.SetZero();
+                EcInt lambdaPow[3];
+                lambdaPow[0] = merged;
+                lambdaPow[1] = ec.CombineScalar(zero, merged);
+                lambdaPow[2] = ec.CombineScalar(zero, lambdaPow[1]);
+
                 for (int rot = 0; rot < 3; ++rot)
                 {
                         for (int neg = 0; neg < 2; ++neg)
@@ -406,9 +426,23 @@ static bool CheckGlvClassTransformConsistencyDeterministic()
                                 EcInt t1, t2;
                                 ApplyGlvTransformPair(k1, k2, rot, neg != 0, t1, t2);
                                 EcInt mergedT = ec.CombineScalar(t1, t2);
-                                if (!mergedT.IsEqual(merged))
+
+                                // The endomorphism identity requires:
+                                //   CombineScalar(rot_r(k1,k2)) == lambda^r * merged mod n
+                                // with sign flip for negation.
+                                EcInt expected = lambdaPow[rot];
+                                if (neg)
+                                {
+                                        // Negate mod n: CombineScalar(-x, 0) = NormalizeToModN(-x)
+                                        EcInt neg_exp = expected;
+                                        neg_exp.Neg();
+                                        expected = ec.CombineScalar(neg_exp, zero);
+                                }
+
+                                if (!mergedT.IsEqual(expected))
                                         return false;
 
+                                // All rotations of (k1, k2) must yield the same canonical form
                                 EcInt cc1, cc2;
                                 u8 ctag = 0;
                                 u8 cinv = 0;
@@ -956,44 +990,95 @@ void AddPointsToList(u32* data, int pnt_cnt, u64 ops_cnt)
 	csAddPoints.Leave();
 }
 
+// Helper: try a single candidate key and verify against the target public key.
+// Returns true if the candidate matches.
+static bool TryCandidate(EcPoint& pnt, EcInt& candidate)
+{
+	gPrivKey = candidate;
+	EcPoint P = ec.MultiplyG(gPrivKey);
+	return P.IsEqual(pnt);
+}
+
 bool Collision_SOTA(EcPoint& pnt, EcInt t1, EcInt t2, int TameType, EcInt w1, EcInt w2, int WildType, bool IsNeg)
 {
 	EcInt t = CombineScalarDistance(t1, t2);
 	EcInt w = CombineScalarDistance(w1, w2);
 	if (IsNeg)
 		t.Neg();
+
+	EcInt diff = t;
+	diff.Sub(w);
+
 	if (TameType == TAME)
 	{
-		gPrivKey = t;
-		gPrivKey.Sub(w);
-		EcInt sv = gPrivKey;
-		gPrivKey.Add(Int_HalfRange);
-		EcPoint P = ec.MultiplyG(gPrivKey);
-		if (P.IsEqual(pnt))
-			return true;
-		gPrivKey = sv;
-		gPrivKey.Neg();
-		gPrivKey.Add(Int_HalfRange);
-		P = ec.MultiplyG(gPrivKey);
-		return P.IsEqual(pnt);
+		// In GLV mode, the wild offset accumulates endomorphism rotations
+		// during canonical walk. The collision equation is:
+		//   D_tame - D_wild = lambda^R * (key - HalfRange)
+		// where R is the unknown accumulated rotation (0, 1, or 2).
+		// We must try all 3 lambda powers (and their negations).
+		//
+		// lambda^0 * diff = diff
+		// lambda^1 * diff = CombineScalar(0, diff) (since CombineScalar(0, x) = lambda*x mod n)
+		// lambda^2 * diff = CombineScalar(0, lambda*diff)
+		//
+		// In non-GLV mode, R=0 always, so only diff and -diff are tried.
+
+		int rotations = gGlvMode ? 3 : 1;
+		EcInt rotated = diff;
+		EcInt zero;
+		zero.SetZero();
+		for (int r = 0; r < rotations; r++)
+		{
+			// Try positive: key = rotated_diff + HalfRange
+			EcInt candidate = rotated;
+			candidate.Add(Int_HalfRange);
+			if (TryCandidate(pnt, candidate))
+				return true;
+
+			// Try negative: key = -rotated_diff + HalfRange
+			candidate = rotated;
+			candidate.Neg();
+			candidate.Add(Int_HalfRange);
+			if (TryCandidate(pnt, candidate))
+				return true;
+
+			// Compute next lambda rotation: rotated = lambda * rotated
+			if (r + 1 < rotations)
+				rotated = ec.CombineScalar(zero, rotated);
+		}
+		return false;
 	}
 	else
 	{
-		gPrivKey = t;
-		gPrivKey.Sub(w);
-		if (gPrivKey.data[4] >> 63)
-			gPrivKey.Neg();
-		gPrivKey.ShiftRight(1);
-		EcInt sv = gPrivKey;
-		gPrivKey.Add(Int_HalfRange);
-		EcPoint P = ec.MultiplyG(gPrivKey);
-		if (P.IsEqual(pnt))
-			return true;
-		gPrivKey = sv;
-		gPrivKey.Neg();
-		gPrivKey.Add(Int_HalfRange);
-		P = ec.MultiplyG(gPrivKey);
-		return P.IsEqual(pnt);
+		// Wild-wild collision: offsets are PntA and PntB = -PntA
+		// Same lambda-rotation issue applies.
+		// The factor is (lambda^B1 + lambda^B2) which for the case where
+		// both are same type simplifies, but we still need to try rotations.
+		if (diff.data[4] >> 63)
+			diff.Neg();
+		diff.ShiftRight(1);
+
+		int rotations = gGlvMode ? 3 : 1;
+		EcInt rotated = diff;
+		EcInt zero;
+		zero.SetZero();
+		for (int r = 0; r < rotations; r++)
+		{
+			EcInt candidate = rotated;
+			candidate.Add(Int_HalfRange);
+			if (TryCandidate(pnt, candidate))
+				return true;
+
+			candidate = rotated;
+			candidate.Neg();
+			candidate.Add(Int_HalfRange);
+			if (TryCandidate(pnt, candidate))
+				return true;
+
+			if (r + 1 < rotations)
+				rotated = ec.CombineScalar(zero, rotated);
+		}
+		return false;
 	}
 }
 
@@ -1097,6 +1182,20 @@ void CheckNewPoints()
 			}
 			TameType = nrecType;
 			WildType = prefType;
+
+			// In GLV mode, the DB stores CPU-canonicalized distances.
+			// Each DP's distance was independently rotated by CanonicalizeGlvPairWithTag
+			// (multiplying the combined scalar by a different lambda^S factor).
+			// We must undo this to recover the GPU-rotated distances, which maintain
+			// the correct arithmetic relationship needed for key recovery.
+			if (gGlvMode)
+			{
+				EcInt uw1, uw2, ut1, ut2;
+				UncanonicalizeGlvPair(w1, w2, pref->canonInvTag, uw1, uw2);
+				UncanonicalizeGlvPair(t1, t2, nrec.canonInvTag, ut1, ut2);
+				w1 = uw1; w2 = uw2;
+				t1 = ut1; t2 = ut2;
+			}
 		}
 		else
 		{
@@ -1113,6 +1212,15 @@ void CheckNewPoints()
 			}
 			TameType = TAME;
 			WildType = nrecType;
+
+			if (gGlvMode)
+			{
+				EcInt uw1, uw2, ut1, ut2;
+				UncanonicalizeGlvPair(w1, w2, nrec.canonInvTag, uw1, uw2);
+				UncanonicalizeGlvPair(t1, t2, pref->canonInvTag, ut1, ut2);
+				w1 = uw1; w2 = uw2;
+				t1 = ut1; t2 = ut2;
+			}
 		}
 
 			// Verify if this is a collision (matching X coordinate)
