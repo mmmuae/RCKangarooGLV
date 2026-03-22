@@ -372,10 +372,7 @@ static void Mul256To512(const u64* a, const u64* b, u64* out)
 		{
 			u64 hi;
 			u64 lo = _umul128(a[i], b[j], &hi);
-			u64 sum = 0;
-			u8 c = _addcarry_u64(0, out[i + j], lo, &sum);
-			c = _addcarry_u64(c, sum, 0, &sum);
-			out[i + j] = sum;
+			u8 c = _addcarry_u64(0, out[i + j], lo, out + (i + j));
 			u64 carry = hi + c;
 			int idx = i + j + 1;
 			while (carry)
